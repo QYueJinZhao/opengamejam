@@ -1,0 +1,21 @@
+{
+  "name": "emberfall",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@opengamehq/sdk": "^0.5.1",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
