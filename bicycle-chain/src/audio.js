@@ -197,6 +197,19 @@ export class Sfx {
 
   click() { this.tone({ freq: 470, to: 300, dur: 0.05, type: 'triangle', gain: 0.08 }); }
 
+  /** 爆破球：低频下坠 + 一层宽噪，要"闷"不要"脆"——脆会读成消除音 */
+  boom() {
+    this.tone({ freq: 96, to: 34, dur: 0.36, type: 'sine', gain: 0.30 });
+    this.tone({ freq: 210, to: 80, dur: 0.16, type: 'square', gain: 0.05 });
+    this.noise({ dur: 0.28, gain: 0.15, freq: 820, q: 0.55 });
+  }
+
+  /** 锈球注入：金属摩擦感，短促、干、不带尾音，和任何"得分"音区分开 */
+  clank() {
+    this.tone({ freq: 330, to: 170, dur: 0.11, type: 'square', gain: 0.045 });
+    this.noise({ dur: 0.09, gain: 0.04, freq: 2800, q: 1.5 });
+  }
+
   snap() { this.tone({ freq: 320, to: 520, dur: 0.06, type: 'square', gain: 0.035 }); }
 
   thud() {

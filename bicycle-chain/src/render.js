@@ -1,11 +1,12 @@
 // Canvas2D 渲染层。虚拟画布 1200×800，按窗口等比缩放。
 //
 // 几何全部动态：轮径 / 槽数 / 射口位置由当前 Game 决定。
-// 球用四重编码区分：色相 + 明度 + 内部纹样 + 中心形符。
-// 色弱模式（V 键）把形符换成白底黑符，形状成为唯一主要信息。
+// 球用**形状**做第一编码：4 基础色（八面体 / 倒角方核 / 星芒 / 三角棱锥）
+// + 3 特殊球（彩虹星晶 / 机械雷 / 锈铁块），7 个剪影互不相似。
+// 色相退成第二编码，所以高对比模式（V 键）只需要加强图底分离，不需要额外形符。
 
 import { C, R, L, N, D, pointAt, tangentAt, normalAt, mod } from './geom.js';
-import { PALETTE, CFG, comboMult } from './sim.js';
+import { PALETTE, CFG, comboMult, ballSkin, RUST, WILD, BOMB } from './sim.js';
 import { MODES, TIERS, scoreBand, tierProgress } from './modes.js';
 
 const VW = 1200, VH = 800;
@@ -104,7 +105,7 @@ export class Renderer {
     this.t = ui.t;
     this.begin(fx);
     this.background(game);
-    this.beltBase(game);
+    this.chassis(game);
     this.slotTicks(game);
     // 标题页把盘面压暗：珠子仍然在动（不是静态背景），但不能干扰读卡片
     const boardAlpha = ui.mode === 'title' ? 0.30 : 1;
@@ -175,72 +176,263 @@ export class Renderer {
     ctx.roundRect(CX - w / 2, CY - h / 2, w, h, h / 2);
   }
 
-  beltBase(game) {
+  // ---------- 底盘 ----------
+  // 绘制顺序是定死的：托盘 → 飞轮 → 凹槽导轨 → 双倍槽 → 珠子。
+  // 飞轮必须压在托盘上、又在导轨之下，否则齿会盖住跑道边。
+  chassis(game) {
+    this.plate();
+    this.flywheels(game);
+    this.groove();
+    this.pads(game);
+  }
+
+  /** 拉丝金属托盘。它比导轨宽一圈，是"整台机器"的底座，不是跑道本身。 */
+  plate() {
     const ctx = this.ctx;
+    const padOut = CHANNEL_W + 44;          // 相对导轨外沿再宽出的量
+    const halfH = R * S + (CHANNEL_W + padOut) / 2;
 
     ctx.save();
-    ctx.shadowColor = 'rgba(56,132,255,0.26)';
-    ctx.shadowBlur = 42;
-    ctx.strokeStyle = 'rgba(10,16,26,1)';
-    ctx.lineWidth = CHANNEL_W + 14;
-    this.stadiumPath(ctx);
+    ctx.shadowColor = 'rgba(30,130,220,0.30)';
+    ctx.shadowBlur = 56;
+    ctx.fillStyle = '#070B12';
+    this.stadiumPath(ctx, padOut);
+    ctx.fill();
+    ctx.restore();
+
+    const g = ctx.createLinearGradient(0, CY - halfH, 0, CY + halfH);
+    g.addColorStop(0, '#1D2836');
+    g.addColorStop(0.18, '#131C27');
+    g.addColorStop(0.56, '#0C121A');
+    g.addColorStop(0.86, '#151E2A');
+    g.addColorStop(1, '#090E15');
+    ctx.fillStyle = g;
+    this.stadiumPath(ctx, padOut);
+    ctx.fill();
+
+    ctx.save();
+    this.stadiumPath(ctx, padOut);
+    ctx.clip();
+    // 拉丝：横向毫米级细线。间距必须是质数行距，否则会和屏幕像素栅格
+    // 产生摩尔纹，在暗部看成一圈一圈的脏渐变。
+    for (let yy = CY - halfH - 40; yy < CY + halfH + 40; yy += 3) {
+      const k = ((yy * 37) % 17) / 17;
+      ctx.fillStyle = `rgba(150,195,245,${(0.004 + k * 0.009).toFixed(4)})`;
+      ctx.fillRect(CX - 470, yy, 940, 1);
+    }
+    // 倒角：外沿一道亮、内沿一道暗，两笔就能把"板"读成"有厚度的板"
+    ctx.strokeStyle = 'rgba(160,210,255,0.12)';
+    ctx.lineWidth = 2;
+    this.stadiumPath(ctx, padOut - 4);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,0.60)';
+    ctx.lineWidth = 2;
+    this.stadiumPath(ctx, padOut - 18);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * 两端飞轮。位置就是两个半圆的圆心，所以它读起来是"链条绕过的那两个轮"，
+   * 不是贴上去的装饰。转速直接取 phase：链条走多少，轮就转多少，
+   * 玩家按方向键时能立刻看到轮在跟手转——这是整台机器"活着"的凭据。
+   */
+  flywheels(game) {
+    const rr = R * S * 0.66;
+    const rot = game ? (game.phase / N) * PI2 : 0;
+    for (const sx of [-1, 1]) {
+      const p = this.toScreen({ x: sx * C, y: 0 });
+      this.gear(p.x, p.y, rr, rot);
+    }
+  }
+
+  gear(cx, cy, r, rot) {
+    const ctx = this.ctx;
+    const teeth = 16;
+    const r0 = r * 0.86, r1 = r;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 齿盘：每颗齿是一个梯形，底边落在 r0 上
+    ctx.save();
+    ctx.rotate(rot);
+    ctx.beginPath();
+    let first = true;
+    for (let i = 0; i < teeth; i++) {
+      const a = (i / teeth) * PI2, st = PI2 / teeth;
+      const pts = [[a - st * 0.34, r0], [a - st * 0.19, r1], [a + st * 0.19, r1], [a + st * 0.34, r0]];
+      for (const [ang, rad] of pts) {
+        const px = Math.cos(ang) * rad, py = Math.sin(ang) * rad;
+        if (first) { ctx.moveTo(px, py); first = false; } else ctx.lineTo(px, py);
+      }
+    }
+    ctx.closePath();
+    const mg = ctx.createLinearGradient(-r, -r, r, r);
+    mg.addColorStop(0, '#3B4A5F');
+    mg.addColorStop(0.42, '#222D3C');
+    mg.addColorStop(1, '#0D1420');
+    ctx.fillStyle = mg;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150,200,255,0.20)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // 辐条 + 轮毂
+    ctx.strokeStyle = 'rgba(10,15,22,0.85)';
+    ctx.lineWidth = r * 0.15;
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * PI2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * r * 0.20, Math.sin(a) * r * 0.20);
+      ctx.lineTo(Math.cos(a) * r0 * 0.84, Math.sin(a) * r0 * 0.84);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.30, 0, PI2);
+    const hg = ctx.createRadialGradient(-r * 0.08, -r * 0.09, 1, 0, 0, r * 0.30);
+    hg.addColorStop(0, '#4A5A70');
+    hg.addColorStop(1, '#141C28');
+    ctx.fillStyle = hg;
+    ctx.fill();
+
+    // 蓝光灯环：拆解图里最醒目的一笔，也是唯一的高饱和元素
+    ctx.beginPath();
+    ctx.arc(0, 0, r0 * 0.90, 0, PI2);
+    ctx.strokeStyle = 'rgba(90,200,255,0.42)';
+    ctx.lineWidth = Math.max(1.4, r * 0.045);
+    ctx.shadowColor = 'rgba(70,190,255,0.9)';
+    ctx.shadowBlur = 14;
     ctx.stroke();
     ctx.restore();
 
-    const grad = ctx.createLinearGradient(0, CY - R * S - 34, 0, CY + R * S + 34);
-    grad.addColorStop(0, '#1B2A3F');
-    grad.addColorStop(0.5, '#101B2A');
-    grad.addColorStop(1, '#182740');
-    ctx.strokeStyle = grad;
+    ctx.restore();
+  }
+
+  /**
+   * 凹槽导轨：中间一条深色槽，两侧各一道轨脊，内侧透青色底光。
+   * "槽"这个字决定了画法——珠子必须看起来是**嵌进去**的，
+   * 所以槽底要比珠子暗得多，且比珠子宽。
+   */
+  groove() {
+    const ctx = this.ctx;
+    const edge = (d) => this.stadiumPath(ctx, 2 * d);
+
+    // 槽底
+    ctx.strokeStyle = '#05090F';
     ctx.lineWidth = CHANNEL_W;
-    this.stadiumPath(ctx);
+    edge(0);
     ctx.stroke();
 
-    ctx.strokeStyle = 'rgba(130,190,255,0.30)';
-    ctx.lineWidth = 2;
-    this.stadiumPath(ctx, CHANNEL_W);
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(130,190,255,0.20)';
-    ctx.lineWidth = 2;
-    this.stadiumPath(ctx, -CHANNEL_W);
-    ctx.stroke();
-
-    ctx.strokeStyle = 'rgba(150,205,255,0.055)';
-    ctx.lineWidth = 1;
-    this.stadiumPath(ctx);
+    const wall = ctx.createLinearGradient(0, CY - R * S - CHANNEL_W, 0, CY + R * S + CHANNEL_W);
+    wall.addColorStop(0, '#2A3B52');
+    wall.addColorStop(0.5, '#16222F');
+    wall.addColorStop(1, '#22334A');
+    ctx.strokeStyle = wall;
+    ctx.lineWidth = CHANNEL_W;
+    edge(0);
     ctx.stroke();
 
-    // 轮毂
-    for (const sx of [-1, 1]) {
-      const p = this.toScreen({ x: sx * C, y: 0 });
-      const hg = ctx.createRadialGradient(p.x, p.y, 4, p.x, p.y, 62);
-      hg.addColorStop(0, 'rgba(70,130,210,0.12)');
-      hg.addColorStop(1, 'rgba(70,130,210,0)');
-      ctx.fillStyle = hg;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 62, 0, PI2);
-      ctx.fill();
+    // 中间压暗，形成"两条平行轨"的错觉
+    ctx.strokeStyle = 'rgba(4,8,14,0.82)';
+    ctx.lineWidth = CHANNEL_W * 0.50;
+    edge(0);
+    ctx.stroke();
 
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 5, 0, PI2);
-      ctx.fillStyle = 'rgba(150,200,255,0.30)';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 38, 0, PI2);
-      ctx.strokeStyle = 'rgba(130,180,240,0.09)';
-      ctx.lineWidth = 1;
+    for (const k of [1, -1]) {
+      ctx.strokeStyle = 'rgba(150,200,255,0.20)';
+      ctx.lineWidth = 2;
+      edge(k * CHANNEL_W * 0.42);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.lineWidth = 1.4;
+      edge(k * (CHANNEL_W * 0.42 + 2.6));
       ctx.stroke();
     }
 
+    // 青色底光
     ctx.save();
-    ctx.textAlign = 'center';
-    ctx.font = `600 11px ${MONO}`;
-    ctx.fillStyle = 'rgba(140,190,255,0.10)';
-    ctx.fillText('B I C Y C L E   C H A I N', CX, CY - 8);
-    ctx.font = `600 10px ${MONO}`;
-    ctx.fillStyle = 'rgba(140,190,255,0.06)';
-    ctx.fillText('M A R B L E   S H O O T E R', CX, CY + 12);
+    ctx.shadowColor = 'rgba(60,220,255,0.85)';
+    ctx.shadowBlur = 20;
+    ctx.strokeStyle = `rgba(96,236,255,${(0.26 + 0.12 * Math.sin(this.t * 1.6)).toFixed(3)})`;
+    ctx.lineWidth = 2.2;
+    edge(-CHANNEL_W * 0.43);
+    ctx.stroke();
     ctx.restore();
+  }
+
+  /**
+   * ×2 得分槽：铺在轨道上的一小段发光带。
+   *
+   * 它不是装饰，是有坐标的判定区：消除段的**中心**落在这段弧里才双倍。
+   * 所以画法必须让"范围"可读——带子有多长，判定就有多长，不能画成一个点。
+   */
+  pads(game) {
+    if (!game || !game.pads || !game.pads.length) return;
+    const ctx = this.ctx;
+    const halfW = CHANNEL_W * 0.46;
+    const half = CFG.padHalf * D;
+
+    for (let i = 0; i < game.pads.length; i++) {
+      const pad = game.pads[i];
+      const steps = 10;
+      const pulse = 0.5 + 0.5 * Math.sin(this.t * 2.4 + i * 2.1);
+
+      const outer = [], inner = [];
+      for (let k = 0; k <= steps; k++) {
+        const s = pad.s - half + 2 * half * (k / steps);
+        const p = this.toScreen(pointAt(s));
+        const n = normalAt(s);
+        outer.push([p.x + n.x * halfW, p.y + n.y * halfW]);
+        inner.push([p.x - n.x * halfW, p.y - n.y * halfW]);
+      }
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(outer[0][0], outer[0][1]);
+      for (const q of outer) ctx.lineTo(q[0], q[1]);
+      for (let k = inner.length - 1; k >= 0; k--) ctx.lineTo(inner[k][0], inner[k][1]);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(255,196,60,${(0.08 + 0.07 * pulse).toFixed(3)})`;
+      ctx.fill();
+      ctx.shadowColor = 'rgba(255,200,70,0.8)';
+      ctx.shadowBlur = 12;
+      ctx.strokeStyle = `rgba(255,214,90,${(0.42 + 0.30 * pulse).toFixed(3)})`;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      // 中心虚线：有它这条带子才读成"一段有起点终点的判定区"，
+      // 而不是"轨道被刷成了金色"。填色已经压得很薄，识别全靠这根线。
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      for (let k = 0; k <= steps; k++) {
+        const s = pad.s - half + 2 * half * (k / steps);
+        const q = this.toScreen(pointAt(s));
+        const n = normalAt(s);
+        // 画在外沿而不是中心线：中心线会被珠子完全盖住，等于没画
+        const qx = q.x + n.x * halfW, qy = q.y + n.y * halfW;
+        if (k === 0) ctx.moveTo(qx, qy);
+        else ctx.lineTo(qx, qy);
+      }
+      ctx.setLineDash([5, 6]);
+      ctx.strokeStyle = `rgba(255,226,140,${(0.34 + 0.26 * pulse).toFixed(3)})`;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // ×2 标签压在外侧，避开珠子
+      const cp = this.toScreen(pointAt(pad.s));
+      const cn = normalAt(pad.s);
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `800 13px ${MONO}`;
+      ctx.fillStyle = `rgba(255,214,90,${(0.58 + 0.34 * pulse).toFixed(3)})`;
+      ctx.shadowColor = 'rgba(255,190,60,0.9)';
+      ctx.shadowBlur = 10;
+      ctx.fillText('×2', cp.x + cn.x * (CHANNEL_W * 0.88), cp.y + cn.y * (CHANNEL_W * 0.88));
+      ctx.restore();
+    }
   }
 
   slotTicks(game) {
@@ -330,7 +522,7 @@ export class Renderer {
   hitRing(s, b) {
     const ctx = this.ctx;
     const p = this.toScreen(pointAt(s));
-    const c = PALETTE[b.ci];
+    const c = ballSkin(b.ci);
     const pulse = 0.5 + 0.5 * Math.sin(this.t * 6.5);
 
     ctx.save();
@@ -348,10 +540,13 @@ export class Renderer {
   drawBead(s, b, near, cb) {
     const p = this.toScreen(pointAt(s));
     const r = BEAD_R;
+    // 锈球不发光。盘面上所有会发光的东西都是"可消资源"，不发光本身就是
+    // 一条视觉规则——它比在石头表面写个"不可消"的符号更早被眼睛接收到。
+    const glow = b.ci !== RUST;
 
-    if (near > 0.02) {
+    if (near > 0.02 && glow) {
       const ctx = this.ctx;
-      const c = PALETTE[b.ci];
+      const c = ballSkin(b.ci);
       ctx.save();
       ctx.globalAlpha = near * 0.9;
       const g = ctx.createRadialGradient(p.x, p.y, r * 0.6, p.x, p.y, r * 2.1);
@@ -376,138 +571,355 @@ export class Renderer {
   }
 
   /**
-   * 一颗球。四重编码：底色渐变（明度）、内部纹样、中心形符、外圈。
-   * cb=true 时把形符放进白底徽章，形状成为主要信息，不再依赖色相。
+   * 一颗球。**形状是第一编码，色相是第二编码。**
+   *
+   * 上一版是"圆盘 + 内部纹样 + 中心形符"，四种区分全压在同一块圆形画布里的
+   * 细节上。问题是远处、快速移动、色弱这三种情况下，细节最先丢失，剩下的
+   * 只有色相 —— 而色相恰恰是色弱玩家最不可靠的通道。
+   *
+   * 这一版让 7 种球有 7 个互不相似的剪影：菱形的、方的、带刺的、三角的、
+   * 星形的、带铆钉的、块状的。余光就能分出类别，颜色只负责"是哪一个"。
+   * 所以色弱模式不再需要额外形符，只加强图底分离（cb=true）。
    */
   ballBody(x, y, r, ci, cb = false) {
     const ctx = this.ctx;
-    const c = PALETTE[ci];
+    const s = ballSkin(ci);
 
-    const g = ctx.createRadialGradient(x - r * 0.34, y - r * 0.38, r * 0.12, x, y, r * 1.05);
-    g.addColorStop(0, c.light);
-    g.addColorStop(0.45, c.base);
-    g.addColorStop(1, c.dark);
+    if (cb) {
+      const hg = ctx.createRadialGradient(x, y, r * 0.82, x, y, r * 1.5);
+      hg.addColorStop(0, 'rgba(0,0,0,0.66)');
+      hg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = hg;
+      ctx.beginPath();
+      ctx.arc(x, y, r * 1.5, 0, PI2);
+      ctx.fill();
+    }
+
+    switch (s.shape) {
+      case 'oct':  this.skinOct(x, y, r, s); break;
+      case 'cube': this.skinCube(x, y, r, s); break;
+      case 'star': this.skinStar(x, y, r, s); break;
+      case 'pyr':  this.skinPyr(x, y, r, s); break;
+      case 'wild': this.skinWild(x, y, r, s); break;
+      case 'bomb': this.skinBomb(x, y, r, s); break;
+      default:     this.skinRust(x, y, r, s); break;
+    }
+  }
+
+  // 八面体：竖棱把菱形劈成左右两半，再加横腰线切成四个三角面。
+  // 明度按"光从左上来"排：左上最亮，右下最暗。这是宝石最省事也最准的画法。
+  skinOct(x, y, r, s) {
+    const ctx = this.ctx;
+    const w = r * 0.78, h = r * 1.02;
+    const T = [x, y - h], B = [x, y + h], L = [x - w, y], Rr = [x + w, y];
+    const G = [x, y];
+
+    ctx.save();
+    ctx.shadowColor = s.base;
+    ctx.shadowBlur = r * 0.7;
+    this.facet(ctx, [T, L, G], s.base, 0.46, 0);
+    this.facet(ctx, [T, G, Rr], s.base, 0.10, 0.06);
+    this.facet(ctx, [L, B, G], s.base, 0.02, 0.30);
+    this.facet(ctx, [G, B, Rr], s.base, 0, 0.46);
+    ctx.restore();
+
+    // 棱线：亮边只给左上，暗边只给右下，中间那条竖棱给一道高光断点
     ctx.beginPath();
-    ctx.arc(x, y, r, 0, PI2);
+    ctx.moveTo(T[0], T[1]); ctx.lineTo(L[0], L[1]);
+    ctx.lineTo(B[0], B[1]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.42)';
+    ctx.lineWidth = Math.max(1, r * 0.075);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(T[0], T[1]); ctx.lineTo(Rr[0], Rr[1]);
+    ctx.lineTo(B[0], B[1]);
+    ctx.strokeStyle = 'rgba(0,0,0,0.30)';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(T[0], T[1] + r * 0.06); ctx.lineTo(G[0], G[1]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+    ctx.lineWidth = Math.max(0.8, r * 0.05);
+    ctx.stroke();
+  }
+
+  // 倒角方核：外圈是倒角方环，内圈是下沉的琥珀面。
+  // 关键在"外环亮、内面暗"——那一圈明暗差就是倒角，不需要真的画斜角。
+  skinCube(x, y, r, s) {
+    const ctx = this.ctx;
+    const a = r * 0.86, rad = r * 0.30;
+
+    ctx.save();
+    ctx.shadowColor = s.base;
+    ctx.shadowBlur = r * 0.55;
+    ctx.beginPath();
+    ctx.roundRect(x - a, y - a, a * 2, a * 2, rad);
+    ctx.fillStyle = s.base;
+    ctx.fill();
+    ctx.restore();
+
+    // 外环受光：上方压白、下方压黑
+    const g = ctx.createLinearGradient(x, y - a, x, y + a);
+    g.addColorStop(0, 'rgba(255,255,255,0.55)');
+    g.addColorStop(0.42, 'rgba(255,255,255,0.05)');
+    g.addColorStop(1, 'rgba(0,0,0,0.34)');
     ctx.fillStyle = g;
     ctx.fill();
 
-    // 纹样（裁在球内）
-    ctx.save();
+    // 下沉内面
+    const ia = a * 0.60;
     ctx.beginPath();
-    ctx.arc(x, y, r * 0.98, 0, PI2);
-    ctx.clip();
-    this.pattern(x, y, r, c.pat);
-    ctx.restore();
-
-    // 外圈
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, PI2);
-    ctx.strokeStyle = 'rgba(255,255,255,0.26)';
-    ctx.lineWidth = Math.max(1, r * 0.1);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(x, y, r - r * 0.06, 0, PI2);
-    ctx.strokeStyle = 'rgba(0,0,0,0.24)';
+    ctx.roundRect(x - ia, y - ia, ia * 2, ia * 2, rad * 0.55);
+    const ig = ctx.createLinearGradient(x, y - ia, x, y + ia);
+    ig.addColorStop(0, 'rgba(0,0,0,0.30)');
+    ig.addColorStop(1, 'rgba(255,255,255,0.16)');
+    ctx.fillStyle = ig;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // 形符
-    if (cb) {
-      ctx.beginPath();
-      ctx.arc(x, y, r * 0.60, 0, PI2);
-      ctx.fillStyle = 'rgba(250,252,255,0.96)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      this.glyph(x, y, r * 0.42, c.glyph, '#080C14');
-    } else {
-      this.glyph(x, y, r * 0.50, c.glyph, c.ink);
-    }
-
-    // 高光
+    // 倒角高光：只画左上两条边，多了就不像金属
     ctx.beginPath();
-    ctx.arc(x - r * 0.33, y - r * 0.36, r * 0.16, 0, PI2);
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.moveTo(x - a + rad * 0.5, y - a + 1.6);
+    ctx.lineTo(x + a - rad, y - a + 1.6);
+    ctx.strokeStyle = 'rgba(255,255,255,0.72)';
+    ctx.lineWidth = Math.max(1, r * 0.07);
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+  }
+
+  // 星芒火核：10 根棱刺，内芯是白热的球。
+  // 这个剪影在 7 种里最"扎眼"，也最不容易和其它混——尖角数量本身就是信息。
+  skinStar(x, y, r, s) {
+    const ctx = this.ctx;
+    this.starPath(ctx, x, y, r * 1.0, r * 0.50, 10);
+
+    ctx.save();
+    ctx.shadowColor = s.base;
+    ctx.shadowBlur = r * 0.42;
+    const g = ctx.createRadialGradient(x, y, r * 0.08, x, y, r * 1.02);
+    g.addColorStop(0, s.light);
+    g.addColorStop(0.42, s.base);
+    g.addColorStop(1, s.dark);
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.34)';
+    ctx.lineWidth = Math.max(0.8, r * 0.05);
+    ctx.stroke();
+    ctx.restore();
+
+    // 内芯
+    const cg = ctx.createRadialGradient(x, y, 0, x, y, r * 0.38);
+    cg.addColorStop(0, 'rgba(255,255,255,0.95)');
+    cg.addColorStop(0.55, s.light);
+    cg.addColorStop(1, 'rgba(255,60,80,0)');
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.38, 0, PI2);
+    ctx.fillStyle = cg;
     ctx.fill();
   }
 
-  pattern(x, y, r, kind) {
+  // 三角棱锥：三条棱汇聚到重心，左面最亮、右面最暗、正前方居中。
+  // 三角形加上这个 Y 形棱线，才能读成"立体锥"而不是"三角片"。
+  skinPyr(x, y, r, s) {
     const ctx = this.ctx;
-    if (kind === 'ring') {
-      ctx.beginPath();
-      ctx.arc(x, y, r * 0.66, 0, PI2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.50)';
-      ctx.lineWidth = r * 0.16;
-      ctx.stroke();
-    } else if (kind === 'stripe') {
-      ctx.strokeStyle = 'rgba(255,255,255,0.26)';
-      ctx.lineWidth = r * 0.20;
-      for (let i = -2; i <= 2; i++) {
-        ctx.beginPath();
-        ctx.moveTo(x - r + i * r * 0.52, y + r);
-        ctx.lineTo(x + r + i * r * 0.52, y - r);
-        ctx.stroke();
-      }
-    } else if (kind === 'plate') {
-      ctx.beginPath();
-      ctx.roundRect(x - r * 0.74, y - r * 0.74, r * 1.48, r * 1.48, r * 0.22);
-      ctx.fillStyle = 'rgba(0,0,0,0.26)';
-      ctx.fill();
-    } else if (kind === 'dots') {
-      ctx.fillStyle = 'rgba(255,255,255,0.58)';
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * PI2 + 0.26;
-        ctx.beginPath();
-        ctx.arc(x + Math.cos(a) * r * 0.66, y + Math.sin(a) * r * 0.66, r * 0.12, 0, PI2);
-        ctx.fill();
-      }
-    } else if (kind === 'double') {
-      ctx.beginPath();
-      ctx.arc(x, y, r * 0.78, 0, PI2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.42)';
-      ctx.lineWidth = r * 0.11;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x, y, r * 0.50, 0, PI2);
-      ctx.strokeStyle = 'rgba(0,0,0,0.24)';
-      ctx.lineWidth = r * 0.10;
-      ctx.stroke();
-    }
+    const A = [x, y - r * 1.02];
+    const B = [x + r * 0.96, y + r * 0.64];
+    const C = [x - r * 0.96, y + r * 0.64];
+    const G = [x + r * 0.02, y + r * 0.06];
+
+    ctx.save();
+    ctx.shadowColor = s.base;
+    ctx.shadowBlur = r * 0.65;
+    this.facet(ctx, [A, C, G], s.base, 0.34, 0);
+    this.facet(ctx, [A, G, B], s.base, 0.02, 0.30);
+    this.facet(ctx, [C, B, G], s.base, 0.10, 0.12);
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]);
+    ctx.lineTo(C[0], C[1]); ctx.closePath();
+    ctx.strokeStyle = 'rgba(255,255,255,0.40)';
+    ctx.lineWidth = Math.max(1, r * 0.07);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(A[0], A[1]); ctx.lineTo(G[0], G[1]);
+    ctx.lineTo(B[0], B[1]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = Math.max(0.8, r * 0.045);
+    ctx.stroke();
   }
 
-  glyph(x, y, r, kind, color) {
+  // 彩虹万能球：五角星晶 + 细金光环。全场唯一的"彩色"物体，
+  // 所以它一眼就能被认出来——这比任何符号都省事。
+  skinWild(x, y, r, s) {
     const ctx = this.ctx;
+
+    // 细金光环先画，压在星后面
     ctx.save();
-    ctx.fillStyle = color;
     ctx.beginPath();
-    if (kind === 'dot') {
-      ctx.arc(x, y, r * 0.82, 0, PI2);
-      ctx.fill();
-    } else if (kind === 'tri') {
-      ctx.moveTo(x, y - r);
-      ctx.lineTo(x + r * 0.94, y + r * 0.72);
-      ctx.lineTo(x - r * 0.94, y + r * 0.72);
-      ctx.closePath();
-      ctx.fill();
-    } else if (kind === 'square') {
-      ctx.rect(x - r * 0.80, y - r * 0.80, r * 1.60, r * 1.60);
-      ctx.fill();
-    } else if (kind === 'cross') {
-      const w = r * 0.32, h = r * 0.98;
-      ctx.rect(x - w, y - h, w * 2, h * 2);
-      ctx.rect(x - h, y - w, h * 2, w * 2);
-      ctx.fill();
+    ctx.ellipse(x, y, r * 1.30, r * 0.60, -0.48, 0, PI2);
+    ctx.strokeStyle = 'rgba(255,222,130,0.95)';
+    ctx.lineWidth = Math.max(1, r * 0.055);
+    ctx.shadowColor = 'rgba(255,200,80,0.9)';
+    ctx.shadowBlur = r * 0.5;
+    ctx.stroke();
+    ctx.restore();
+
+    this.starPath(ctx, x, y, r * 1.04, r * 0.40, 5);
+    if (ctx.createConicGradient) {
+      const g = ctx.createConicGradient(-Math.PI / 2, x, y);
+      const stops = ['#FF5E6C', '#FFC93C', '#5BE37A', '#3FD8F0', '#6E8CFF', '#C86BFF', '#FF5E6C'];
+      stops.forEach((c, i) => g.addColorStop(i / (stops.length - 1), c));
+      ctx.fillStyle = g;
     } else {
-      ctx.moveTo(x, y - r);
-      ctx.lineTo(x + r * 0.80, y);
-      ctx.lineTo(x, y + r);
-      ctx.lineTo(x - r * 0.80, y);
-      ctx.closePath();
+      const g = ctx.createLinearGradient(x - r, y - r, x + r, y + r);
+      g.addColorStop(0, '#FF5E6C');
+      g.addColorStop(0.5, '#FFD24A');
+      g.addColorStop(1, '#6EE7FF');
+      ctx.fillStyle = g;
+    }
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.62)';
+    ctx.lineWidth = Math.max(0.8, r * 0.055);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.30, 0, PI2);
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fill();
+  }
+
+  // 爆破雷：暗钛球体 + 一圈铆钉 + 熔橙核心。全 7 种里唯一"有机械零件"的，
+  // 剪影是靠铆钉的锯齿和核心的强发光的双重特征立住的。
+  skinBomb(x, y, r, s) {
+    const ctx = this.ctx;
+    const R0 = r * 0.94;
+
+    const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.36, r * 0.1, x, y, R0);
+    g.addColorStop(0, '#5A6474');
+    g.addColorStop(0.5, '#2B333F');
+    g.addColorStop(1, '#0B0F15');
+    ctx.beginPath();
+    ctx.arc(x, y, R0, 0, PI2);
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // 铆钉
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * PI2 + 0.19;
+      const px = x + Math.cos(a) * R0 * 0.80;
+      const py = y + Math.sin(a) * R0 * 0.80;
+      ctx.beginPath();
+      ctx.arc(px, py, r * 0.085, 0, PI2);
+      ctx.fillStyle = 'rgba(160,178,200,0.55)';
+      ctx.fill();
+    }
+
+    // 熔橙核心
+    ctx.save();
+    ctx.shadowColor = 'rgba(255,120,20,0.95)';
+    ctx.shadowBlur = r * 0.85;
+    const cg = ctx.createRadialGradient(x, y, 0, x, y, r * 0.46);
+    cg.addColorStop(0, '#FFF6C8');
+    cg.addColorStop(0.32, '#FFB43A');
+    cg.addColorStop(0.68, '#FF6A00');
+    cg.addColorStop(1, '#7A2200');
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.46, 0, PI2);
+    ctx.fillStyle = cg;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.46, 0, PI2);
+    ctx.strokeStyle = 'rgba(255,150,60,0.75)';
+    ctx.lineWidth = Math.max(1, r * 0.07);
+    ctx.stroke();
+
+    // 顶部高光：金属球必须有一道硬高光，否则读成塑料
+    ctx.beginPath();
+    ctx.arc(x, y, R0, Math.PI * 1.08, Math.PI * 1.62);
+    ctx.strokeStyle = 'rgba(190,215,255,0.42)';
+    ctx.lineWidth = Math.max(1, r * 0.10);
+    ctx.stroke();
+  }
+
+  // 锈球：不规则多边形 + 麻点 + 锈斑，**刻意不加任何发光**。
+  // 盘面上所有会发光的东西都是"可消资源"，锈球不发光，玩家第一眼就知道
+  // 它不参与匹配。这条视觉规则比在球上写"X"更有效。
+  skinRust(x, y, r, s) {
+    const ctx = this.ctx;
+    const rr = [1.00, 0.83, 0.97, 0.80, 1.00, 0.86, 1.02, 0.82, 0.95];
+    const n = rr.length;
+
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * PI2 - 0.35;
+      const rad = r * 0.98 * rr[i];
+      const px = x + Math.cos(a) * rad, py = y + Math.sin(a) * rad;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.closePath();
+
+    const g = ctx.createLinearGradient(x - r * 0.5, y - r, x + r * 0.6, y + r);
+    g.addColorStop(0, '#B9B4AC');
+    g.addColorStop(0.45, '#8C8781');
+    g.addColorStop(1, '#454340');
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    ctx.save();
+    ctx.clip();
+    // 锈斑：不规则的暖褐色块，位置写死，保证每颗锈球长得一样
+    const patches = [[-0.34, -0.28, 0.34, 0.22], [0.30, 0.10, 0.28, 0.20], [0.02, 0.42, 0.30, 0.16]];
+    for (const [dx, dy, rw, rh] of patches) {
+      ctx.beginPath();
+      ctx.ellipse(x + dx * r, y + dy * r, rw * r, rh * r, dx, 0, PI2);
+      ctx.fillStyle = 'rgba(126,74,44,0.26)';
+      ctx.fill();
+    }
+    // 麻点
+    const pits = [[-0.5, 0.2, 0.10], [0.15, -0.5, 0.08], [0.42, 0.38, 0.07], [-0.14, 0.02, 0.06]];
+    for (const [dx, dy, pr] of pits) {
+      ctx.beginPath();
+      ctx.arc(x + dx * r, y + dy * r, pr * r, 0, PI2);
+      ctx.fillStyle = 'rgba(24,20,16,0.34)';
       ctx.fill();
     }
     ctx.restore();
+
+    ctx.strokeStyle = 'rgba(30,26,22,0.55)';
+    ctx.lineWidth = Math.max(1, r * 0.07);
+    ctx.stroke();
+  }
+
+  /** 正 n 角星的路径：外半径 R、内半径 r */
+  starPath(ctx, x, y, R, r, n) {
+    ctx.beginPath();
+    for (let i = 0; i < n * 2; i++) {
+      const a = (i / (n * 2)) * PI2 - Math.PI / 2;
+      const rad = i % 2 ? r : R;
+      const px = x + Math.cos(a) * rad, py = y + Math.sin(a) * rad;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.closePath();
+  }
+
+  /** 填一个多边形面：底色 + 白/黑叠层。宝石的明暗全靠这两个 alpha。 */
+  facet(ctx, pts, base, w = 0, b = 0) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = base;
+    ctx.fill();
+    if (w) { ctx.fillStyle = `rgba(255,255,255,${w})`; ctx.fill(); }
+    if (b) { ctx.fillStyle = `rgba(0,0,0,${b})`; ctx.fill(); }
   }
 
   // ---------- 落点 ----------
@@ -598,7 +1010,7 @@ export class Renderer {
 
   drawProjectile(game, ball) {
     const ctx = this.ctx;
-    const c = PALETTE[ball.ci];
+    const c = ballSkin(ball.ci);
     const k = Math.min(1, ball.t / CFG.flightTime);
 
     const from = NOZZLES[ball.idx] || NOZZLES[0];
@@ -640,6 +1052,108 @@ export class Renderer {
     ctx.fill();
 
     this.ballBody(p.x, p.y, BEAD_R * 0.92, ball.ci, false);
+  }
+
+  /**
+   * 磁轨炮筒。调用前已经平移到炮口中心、旋转到"局部 +Y 指向跑道"。
+   *
+   * 结构分三层：两根外置导轨（发光）、中间的主体（暗金属）、炮尾的蓄力条。
+   * 导轨比主体长，是为了让"这一炮是打向跑道的"这件事在剪影上就成立——
+   * 上一版是一根喇叭口，看起来像喷嘴而不是发射器。
+   */
+  cannon(charge, head) {
+    const ctx = this.ctx;
+    const half = 16;
+
+    for (const sx of [-1, 1]) {
+      const x0 = sx * 17.5;
+      const g = ctx.createLinearGradient(0, -47, 0, 38);
+      g.addColorStop(0, '#31415A');
+      g.addColorStop(1, '#0B1119');
+      ctx.beginPath();
+      ctx.roundRect(x0 - 4.5, -47, 9, 90, 4.5);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(130,200,255,0.16)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // 导轨能量条：蓄力越满越长越亮。这是"什么时候开火"的主提示，
+      // 比原来的环形进度更好读——环形进度在炮身侧面常常被珠子挡住。
+      const h = 38 * (0.22 + 0.78 * charge);
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(x0 - 1.4, 38 - h, 2.8, h, 1.4);
+      ctx.fillStyle = `rgba(96,224,255,${(0.20 + 0.60 * charge).toFixed(3)})`;
+      ctx.shadowColor = 'rgba(80,200,255,0.9)';
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 主体
+    ctx.beginPath();
+    ctx.roundRect(-half, -40, half * 2, 62, 11);
+    const bg = ctx.createLinearGradient(-half, -40, half, 22);
+    bg.addColorStop(0, '#3E4F67');
+    bg.addColorStop(0.45, '#1B2532');
+    bg.addColorStop(1, '#0A0F16');
+    ctx.fillStyle = bg;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(140,200,255,0.22)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // 炮尾盖板
+    ctx.beginPath();
+    ctx.roundRect(-half + 3, -40, half * 2 - 6, 10, 5);
+    ctx.fillStyle = 'rgba(96,116,148,0.30)';
+    ctx.fill();
+
+    // 蓄力条（炮尾横条）：和导轨同步，但给的是"还差多少"的精确比例
+    const bw = (half - 5) * 2;
+    ctx.beginPath();
+    ctx.roundRect(-half + 5, -49.5, bw, 3.5, 1.75);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(-half + 5, -49.5, bw * charge, 3.5, 1.75);
+    ctx.fillStyle = `rgba(120,228,255,${(0.40 + 0.45 * charge).toFixed(3)})`;
+    ctx.fill();
+
+    // 机芯凹槽：待发球会盖在上面，所以这里只画"井"和一圈色环
+    ctx.beginPath();
+    ctx.arc(0, -7, 15.5, 0, PI2);
+    ctx.fillStyle = '#080C12';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, -7, 15.5, 0, PI2);
+    ctx.strokeStyle = head.base;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2.4;
+    ctx.shadowColor = head.base;
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+
+    // 炮口
+    ctx.beginPath();
+    ctx.ellipse(0, 23, 11.5, 5, 0, 0, PI2);
+    ctx.fillStyle = 'rgba(6,10,16,0.92)';
+    ctx.fill();
+    ctx.strokeStyle = `rgba(110,225,255,${(0.28 + 0.5 * charge).toFixed(3)})`;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    for (const sx of [-1, 1]) {
+      for (const yy of [-33, 15]) {
+        ctx.beginPath();
+        ctx.arc(sx * (half - 4.5), yy, 2, 0, PI2);
+        ctx.fillStyle = 'rgba(170,190,215,0.42)';
+        ctx.fill();
+      }
+    }
   }
 
   // ---------- 炮口 ----------
@@ -686,58 +1200,37 @@ export class Renderer {
     const nz = NOZZLES[idx];
     if (!nz) return;
     const p = this.toScreen(nz);
-    const head = PALETTE[game.queues[idx][0]] || PALETTE[0];
+    const head = ballSkin(game.queues[idx][0]);
     const charge = Math.min(1, game.beatClock / game.beat);
     const dim = active ? 1 : 0.42;
 
     ctx.save();
     ctx.globalAlpha = dim;
 
-    // 炮管：从盘心指向落点
-    const tip = { x: p.x - nz.nx * 30, y: p.y - nz.ny * 30 };
-    ctx.beginPath();
-    ctx.moveTo(p.x + nz.ny * 12, p.y - nz.nx * 12);
-    ctx.lineTo(tip.x + nz.ny * 8, tip.y - nz.nx * 8);
-    ctx.lineTo(tip.x - nz.ny * 8, tip.y + nz.nx * 8);
-    ctx.lineTo(p.x - nz.ny * 12, p.y + nz.nx * 12);
-    ctx.closePath();
-    ctx.fillStyle = '#101724';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(140,190,255,0.24)';
-    ctx.lineWidth = 1.3;
-    ctx.stroke();
-
-    // 指向落点的虚线
+    // 指向落点的虚线（压在炮身以下）
+    const tipW = { x: p.x - nz.nx * 36, y: p.y - nz.ny * 36 };
     ctx.save();
     ctx.setLineDash([4, 10]);
     ctx.strokeStyle = 'rgba(150,200,255,0.10)';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.moveTo(tip.x, tip.y);
+    ctx.moveTo(tipW.x, tipW.y);
     ctx.lineTo(this.toScreen(IMPACTS[idx]).x, this.toScreen(IMPACTS[idx]).y);
     ctx.stroke();
     ctx.restore();
 
-    // 盘体
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 25, 0, PI2);
-    ctx.fillStyle = '#131A26';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(140,190,255,0.30)';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
+    // 炮身：进局部坐标再画，局部 +Y 指向跑道。
+    // 这样同一个函数能被"上方单炮"和"下方复制 180°"两处复用，
+    // 而不需要两套坐标——这正是拆解图里"复制旋转 180°"那句话的代码形态。
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(Math.atan2(nz.nx, -nz.ny));
+    this.cannon(charge, head);
+    ctx.restore();
 
-    // 充能弧
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 31, -Math.PI / 2, -Math.PI / 2 + PI2 * charge);
-    ctx.strokeStyle = head.base;
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
-    ctx.stroke();
-    ctx.lineCap = 'butt';
-
-    // 待发球
-    this.ballBody(p.x, p.y, 11, game.queues[idx][0], ui.cb);
+    // 待发球：坐在炮身凹槽里。它必须是唯一"实体"的球，
+    // 因为玩家要靠它决定这一发往哪打。
+    this.ballBody(p.x - nz.nx * 7, p.y - nz.ny * 7, 13, game.queues[idx][0], ui.cb);
     ctx.restore();
 
     // 预览队列：沿切线排开，越小越远
@@ -798,7 +1291,7 @@ export class Renderer {
       if (k > 0.02) {
         const w = Math.pow(k, 0.7);
         ctx.beginPath();
-        ctx.arc(g.x, g.y, r, 0, PI2);
+        ctx.arc(g.x, g.y, r * 0.72, 0, PI2);
         ctx.fillStyle = `rgba(255,255,255,${(0.95 * w).toFixed(2)})`;
         ctx.fill();
       }
@@ -870,6 +1363,10 @@ export class Renderer {
     if (!fx || !fx.floats) return;
     const ctx = this.ctx;
     ctx.textAlign = 'center';
+    // 描边阴影不是装饰：浮字经常落在跑道正上方，底下是亮色珠子和光带，
+    // 不加暗底会出现"看得见轮廓但读不出数字"的情况。
+    ctx.shadowColor = 'rgba(0,0,0,0.85)';
+    ctx.shadowBlur = 7;
     for (const f of fx.floats) {
       const a = Math.max(0, f.life / f.max);
       const y = f.y - (1 - a) * 46;
@@ -879,6 +1376,7 @@ export class Renderer {
       ctx.fillText(f.text, f.x, y);
       ctx.globalAlpha = 1;
     }
+    ctx.shadowBlur = 0;
   }
 
   // ---------- HUD ----------
@@ -1218,7 +1716,7 @@ export class Renderer {
       for (let ci = 0; ci < nColors; ci++) {
         ctx.beginPath();
         ctx.arc(x + 24 + ci * 20, y0 + 196, 6, 0, PI2);
-        ctx.fillStyle = PALETTE[ci].base;
+        ctx.fillStyle = ballSkin(ci).base;
         ctx.fill();
         ctx.strokeStyle = 'rgba(255,255,255,0.28)';
         ctx.lineWidth = 1;
@@ -1236,6 +1734,29 @@ export class Renderer {
         ctx.fillText('BEST —', x + 18, y0 + ch - 14);
       }
       ctx.textAlign = 'center';
+    }
+
+    // 球种图谱：7 种球一字排开。
+    // 它同时是三件事：新手教学、形状编码的自证、以及"色弱也能玩"的说明——
+    // 只要玩家一眼看出这 7 个不是同一个圆换颜色，就会相信形状可以当线索用。
+    const LEG = [
+      [0, '紫 · 八面体'],
+      [1, '金 · 方核'],
+      [2, '红 · 星芒'],
+      [3, '青 · 棱锥'],
+      [WILD, '万能 · 百搭'],
+      [BOMB, '爆破 · 清两侧'],
+      [RUST, '锈球 · 障碍'],
+    ];
+    const lgap = 108;
+    const lx0 = CX - ((LEG.length - 1) * lgap) / 2;
+    for (let i = 0; i < LEG.length; i++) {
+      const lx = lx0 + i * lgap;
+      this.ballBody(lx, 660, 16, LEG[i][0], false);
+      ctx.font = `500 11px ${FONT}`;
+      ctx.fillStyle = ink(0.34);
+      ctx.textAlign = 'center';
+      ctx.fillText(LEG[i][1], lx, 692);
     }
 
     const pulse = 0.55 + 0.45 * Math.sin(this.t * 3);

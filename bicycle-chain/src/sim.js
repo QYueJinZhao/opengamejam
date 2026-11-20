@@ -7,18 +7,49 @@
 // 3. 三射口模式「轮转两发」：每拍只有一个口休息，下拍换一个，压力仍是 2 球/拍；
 // 4. 新增跨节拍连击 RUSH：连续每拍都有消除才涨，断一拍就归零，是主要得分杠杆。
 
-import { N, D, mod, configure } from './geom.js';
+import { N, D, L, mod, configure } from './geom.js';
 import { getMode } from './modes.js';
 
-// ---- 球种：色相 + 明度 + 内部纹样 + 中心形符，四重编码 ----
-// 目的：色弱玩家靠「纹样 + 形符 + 明暗」也能区分，不依赖色相。
+// ---- 球种：形状是第一编码，色相是第二编码 ----
+//
+// 上一版是「圆形球 + 内部纹样 + 中心形符」，四种区分全靠同一块圆形画布里的
+// 细节。问题是：远处、快速移动、色弱三种情况下，圆盘上的细节最先丢失，
+// 剩下的只有色相 —— 而色相恰恰是色弱玩家最不可靠的通道。
+//
+// 这一版把**轮廓**做成第一编码：八面体 / 倒角方核 / 星芒 / 三角棱锥，
+// 四个剪影互相之间没有一个相似。眼睛在余光里就能靠"尖的/方的/带刺的/三角的"
+// 认出来，颜色退化成辅助信息。这也是色弱模式不需要额外形符的原因。
+//
+// 顺序即解锁顺序：colorCount() 取前 n 个，所以先给对比最强的两组（紫/金），
+// 再上红，最后青。
 export const PALETTE = [
-  { key: 'r', name: '红', base: '#FF3B4E', light: '#FFA6B0', dark: '#7C0F1A', glyph: 'dot',     pat: 'ring',   ink: '#FFF4F5' },
-  { key: 'b', name: '蓝', base: '#2E86FF', light: '#A9CFFF', dark: '#0A3A78', glyph: 'tri',     pat: 'stripe', ink: '#F4F8FF' },
-  { key: 'g', name: '金', base: '#FFC93C', light: '#FFF0B8', dark: '#7F5200', glyph: 'square',  pat: 'plate',  ink: '#2B1D00' },
-  { key: 'p', name: '紫', base: '#A855F7', light: '#DCB6FF', dark: '#42157F', glyph: 'diamond', pat: 'dots',   ink: '#FFF0FF' },
-  { key: 'c', name: '青', base: '#12E0B8', light: '#9BFFF1', dark: '#045348', glyph: 'cross',   pat: 'double', ink: '#00241E' },
+  { key: 'p', name: '紫', shape: 'oct',  base: '#A855F7', light: '#E4CBFF', dark: '#3A0F73' },
+  { key: 'g', name: '金', shape: 'cube', base: '#FFC23A', light: '#FFF0BA', dark: '#5E3800' },
+  { key: 'r', name: '红', shape: 'star', base: '#FF3B4E', light: '#FFB6BE', dark: '#6C0913' },
+  { key: 'c', name: '青', shape: 'pyr',  base: '#19D3F0', light: '#B6F5FF', dark: '#044A61' },
 ];
+
+// 特殊球的 ci 故意用远离 0..3 的值：所有 `ci === 某色` 的判断天然不会误命中，
+// 而 `b.ci < PALETTE.length` 这类范围判断也不用改。
+export const WILD = 10;   // 彩虹万能球：落地时自解析成最合适的颜色
+export const BOMB = 11;   // 爆破炸弹球：落地即炸，清掉落点两侧
+export const RUST = 12;   // 锈球：不参与匹配的障碍，只能被相邻消除或炸弹清掉
+
+export const SPECIAL = {
+  [WILD]: { key: 'w', name: '万能', shape: 'wild', base: '#FFD86B', light: '#FFFFFF', dark: '#7A4E00' },
+  [BOMB]: { key: 'x', name: '爆破', shape: 'bomb', base: '#FF8A2B', light: '#FFD9A0', dark: '#3A1600' },
+  [RUST]: { key: 'u', name: '锈',   shape: 'rust', base: '#8C8781', light: '#C3BDB5', dark: '#211F1C' },
+};
+
+/** 任何 ci → 配色。渲染层与 HUD 共用，避免到处写 PALETTE[ci] 而漏掉特殊球。 */
+export function ballSkin(ci) {
+  return PALETTE[ci] || SPECIAL[ci] || SPECIAL[RUST];
+}
+
+/** 是否能参与颜色匹配（锈球不能） */
+export function isColor(ci) {
+  return ci >= 0 && ci < PALETTE.length;
+}
 
 export const BASE_CFG = {
   vMax: 13.0,
@@ -52,6 +83,26 @@ export const BASE_CFG = {
   stages: [[0, 1], [20, 2]],
   volley: 2,
   rotate: false,
+
+  // ---- 特殊球 ----
+  // 概率是「每次补球」的独立概率，不是场上占比。设计意图：
+  //   万能球是"补洞"的工具，不能多，多了就没有卡色的紧张感；
+  //   爆破球是"止损"的工具，也不能多，否则盘面永远炸得空。
+  specialStart: 15,     // 前 15 秒纯基础色，先把三色三消教会
+  wildRate: 0.065,
+  bombRate: 0.055,
+
+  // 锈球：从 rustStart 起，每 rustEvery 秒往链条尾端塞一颗。
+  // 它不是"发球发歪了"，是**时间压力**——放着不管，跑道会被死重吃掉，
+  // 而且它会打断同色连续段，让本来能三消的地方变成两消。
+  rustStart: 24,
+  rustEvery: 9,
+
+  // ---- ×2 得分槽 ----
+  // 槽位按**弧长**固定在世界坐标上（不跟珠子走），所以消除必须"打在那一段"。
+  // 每 padEvery 秒整体换位一次，逼玩家重新规划，而不是记住一个点位就完事。
+  padEvery: 20,
+  padHalf: 2.0,        // 槽半长，单位是槽；×2 判定范围 = ±padHalf 格
 };
 
 export const CFG = { ...BASE_CFG };
@@ -64,6 +115,9 @@ const COMBO_MULT = [1, 1, 1.1, 1.2, 1.35, 1.5, 1.65, 1.8, 2.0, 2.2, 2.4, 2.6, 2.
 const COMBO_WINDOW = 3.0;
 const BASE_SCORE = (n) => (n === 3 ? 300 : n === 4 ? 500 : 800 + 400 * Math.max(0, n - 5));
 const SWEEP_BONUS = 1500;
+// 爆破球的基础分。故意低于一次普通三消（300），因为它的价值在"止损"，
+// 不在"赚分"——否则最优解会变成一直等炸弹。
+const BOMB_BASE = 220;
 
 /** 连消倍率（渲染层与逻辑层共用同一张表，避免 HUD 显示和实际结算不一致） */
 export function comboMult(n) {
@@ -79,6 +133,12 @@ export function mulberry32(seed) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** 闭合环上两点的最短弧长距离 */
+function circDist(a, b, L) {
+  const d = Math.abs(a - b) % L;
+  return Math.min(d, L - d);
 }
 
 let beadSeq = 1;
@@ -122,6 +182,13 @@ export class Game {
     this.comboT = -99;
     this.maxCombo = 0;
     this.volleyIndex = 0;    // 三射口：下一个休息的口
+    this.rustClock = 0;
+    this.rustPlaced = 0;
+    this.bombs = 0;
+    this.wilds = 0;
+    this.padClock = 0;
+    this.pads = [];
+    this.padHits = 0;
     this.shots = 0;
     this.drops = 0;
     this.clears = 0;
@@ -133,6 +200,7 @@ export class Game {
     this.events = [];
 
     this.placeOpening();
+    this.rollPads();
   }
 
   // 开局阵型：每个落点周围铺一段，段内不允许出现现成三连
@@ -236,6 +304,56 @@ export class Game {
     return Math.floor(this.rng() * maxCi);
   }
 
+  /**
+   * 补一颗待发球：基础色 or 特殊球。
+   * 特殊球的概率是**一次判定里依次吃掉**的，所以 wildRate/bombRate 是
+   * 互斥区间而不是叠加，改一个不会把另一个挤掉。
+   */
+  pickShot() {
+    if (this.time >= CFG.specialStart) {
+      const r = this.rng();
+      if (r < CFG.wildRate) return WILD;
+      if (r < CFG.wildRate + CFG.bombRate) return BOMB;
+    }
+    return this.pickColor();
+  }
+
+  /**
+   * 万能球落地时自解析成哪个颜色。
+   *
+   * 这里做了一个和"标准万能球"不同的选择：**落地即定型，不在链条上保留彩虹态**。
+   * 理由是这个游戏的匹配判定是一条横扫的游程扫描（findMatch），一旦允许
+   * "万能在链上仍可变色"，游程就有多解，判定会依赖扫描顺序，玩家无法预测。
+   * 落地定型把歧义消灭在落地那一刻：玩家看到的是"我把它变成了需要的色"，
+   * 观感和"万能"完全一致，判定却是唯一的。
+   */
+  chooseWildColor(k) {
+    const n = this.colorCount();
+    let bestCi = 0, bestLen = -1;
+    for (let ci = 0; ci < n; ci++) {
+      let len = 1;
+      for (let i = 1; i < N; i++) {
+        const b = this.slots[mod(k - i, N)];
+        if (b && b.ci === ci) len++; else break;
+      }
+      for (let i = 1; i < N; i++) {
+        const b = this.slots[mod(k + i, N)];
+        if (b && b.ci === ci) len++; else break;
+      }
+      if (len > bestLen) { bestLen = len; bestCi = ci; }
+    }
+    // 两侧都是空位时长度全是 1，此时按"场上最多的颜色"补，避免万能球
+    // 落在空跑道上变成一个随机色块。
+    if (bestLen <= 1) {
+      const count = new Array(n).fill(0);
+      for (const b of this.slots) if (b && b.ci < n) count[b.ci]++;
+      let top = 0;
+      for (let ci = 1; ci < n; ci++) if (count[ci] > count[top]) top = ci;
+      return top;
+    }
+    return bestCi;
+  }
+
   // ---- 每固定步 ----
   step(dt) {
     if (this.dead) return;
@@ -267,6 +385,25 @@ export class Game {
       this.fire();
     }
 
+    // 锈球注入：按时间，不按拍。它和"发球"是两条独立的压力线——
+    // 拍子决定玩家有多忙，锈球决定盘面有多脏。
+    if (CFG.rustEvery > 0 && this.time >= CFG.rustStart) {
+      this.rustClock += dt;
+      if (this.rustClock >= CFG.rustEvery) {
+        this.rustClock -= CFG.rustEvery;
+        this.injectRust();
+      }
+    }
+
+    if (CFG.padEvery > 0) {
+      this.padClock += dt;
+      if (this.padClock >= CFG.padEvery) {
+        this.padClock -= CFG.padEvery;
+        this.rollPads();
+        this.events.push({ type: 'padmove' });
+      }
+    }
+
     if (this.balls.length) {
       for (const b of this.balls) b.t += dt;
       if (this.balls[0].t >= CFG.flightTime) this.land();
@@ -283,7 +420,7 @@ export class Game {
     this.balls = idxs.map((i) => {
       const ci = this.queues[i][0];
       this.queues[i].shift();
-      this.queues[i].push(this.pickColor());
+      this.queues[i].push(this.pickShot());
       return { ci, off: this.nozzleOff[i], idx: i, t: 0 };
     });
 
@@ -311,21 +448,93 @@ export class Game {
       off: b.off,
       idx: b.idx,
     }));
-    for (const t of targets) this.dropAt(t.k, t.ci, t.off);
+    for (const t of targets) {
+      if (t.ci === BOMB) this.detonate(t.k, t.off);
+      else this.dropAt(t.k, t.ci, t.off);
+    }
   }
 
-  dropAt(k, ci, off) {
+  /**
+   * 爆破球：落地即炸，不再插进链条。
+   *
+   * 这是三选二里唯一"不需要匹配"的动作，所以它的代价不是颜色、而是**那一发**：
+   * 你在两球一拍里用掉了一颗本该用来补洞的球。威力只给 5 格，
+   * 是因为再大就等于给了一个"随时清盘"的按钮，盘面压力会被抹平。
+   */
+  detonate(k, off = 0) {
+    if (this.dead) return;
+    this.bombs++;
+
+    let c = k;
+    if (!this.slots[c]) {
+      const p = this.nearestBead(c, +1);
+      const q = this.nearestBead(c, -1);
+      if (p < 0 && q < 0) {
+        this.events.push({ type: 'bomb', slot: c, s: mod(c + this.phase, N) * D, hit: 0, gain: 0, off });
+        return;
+      }
+      c = (p >= 0 && (q < 0 || p <= q)) ? mod(c + p, N) : mod(c - q, N);
+    }
+
+    let start = c;
+    for (let i = 1; i <= 2; i++) {
+      if (!this.slots[mod(c - i, N)]) break;
+      start = mod(c - i, N);
+    }
+    let len = 0;
+    while (len < 5 && this.slots[mod(start + len, N)]) len++;
+    if (len === 0) return;
+
+    const colors = [], positions = [];
+    let rustHit = 0;
+    for (let i = 0; i < len; i++) {
+      const idx = mod(start + i, N);
+      const b = this.slots[idx];
+      if (b.ci === RUST) rustHit++;
+      colors.push(b.ci);
+      positions.push(mod(idx + this.phase, N) * D);
+      this.slots[idx] = null;
+    }
+
+    const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
+    const gain = Math.round((BOMB_BASE + BOMB_BASE * 0.6 * (len - 1) + rustHit * 260) * comboMult);
+    this.score += gain;
+    this.clears++;
+    this.combo += len;
+    this.comboT = this.time;
+    this.maxCombo = Math.max(this.maxCombo, this.combo);
+
+    this.events.push({
+      type: 'bomb', slot: c, off, hit: len, col: colors, positions,
+      gain, comboMult, s: mod(start + this.phase, N) * D, len,
+      combo: this.combo,
+    });
+
+    this.compact(start, len);
+    // 炸完可能露出新的三连：交给常规结算收尾
+    this.resolve(-1, off);
+  }
+
+  dropAt(k, ci0, off) {
     if (this.dead) return;
     if (this.occupied() >= N) { this.kill('overflow'); return; }
 
-    const bead = this.makeBead(ci);
     const wasEmpty = this.slots[k] === null;
     const target = wasEmpty ? this.snap(k) : k;
     if (wasEmpty && target !== k) this.snapped++;
 
+    // 万能球在**吸附之后**才定型：否则落点会偏一格，定出来的颜色也就错了。
+    const ci = ci0 === WILD ? this.chooseWildColor(target) : ci0;
+    if (ci0 === WILD) this.wilds++;
+    const bead = this.makeBead(ci);
+
     if (this.slots[target] === null) {
       this.slots[target] = bead;
-      this.events.push({ type: 'lone', slot: target, ci, off, s: mod(target + this.phase, N) * D });
+      this.events.push({
+        type: 'lone', slot: target, ci, off,
+        s: mod(target + this.phase, N) * D,
+        wild: ci0 === WILD,
+      });
       this.resolve(target, off);
       return;
     }
@@ -353,6 +562,7 @@ export class Game {
       s: mod(target + this.phase, N) * D,
       snapped: wasEmpty && target !== k,
       dropSlot: k,
+      wild: ci0 === WILD,
     });
 
     this.resolve(target, off);
@@ -380,6 +590,48 @@ export class Game {
     return -1;
   }
 
+  /**
+   * 往链条**尾端**塞一颗锈球。
+   *
+   * 选尾端而不是随机位置，是因为链条在这里始终是一段连续弧：尾端是唯一
+   * "接上去不会把链条劈成两段"的位置。塞在中间虽然更阴险，但会破坏连续性，
+   * 让插入推挤与 compact 的前提失效——那是拿正确性换难度，不值。
+   */
+  injectRust() {
+    if (this.occupied() >= N - 1) return;   // 至少留一格给玩家发球
+    let tail = -1;
+    for (let i = 0; i < N; i++) {
+      if (this.slots[i] && !this.slots[mod(i + 1, N)]) { tail = i; break; }
+    }
+    if (tail < 0) return;
+    const at = mod(tail + 1, N);
+    this.slots[at] = this.makeBead(RUST);
+    this.rustPlaced++;
+    this.events.push({ type: 'rust', slot: at, s: mod(at + this.phase, N) * D });
+  }
+
+  /**
+   * 重掷两个 ×2 槽的位置。
+   *
+   * 约束和"发球口"保持距离：槽如果正好压在炮口落点上，玩家什么都不用做就能
+   * 吃到双倍，这个机制就变成了白送分。要让它有意义，必须"绕过去打"。
+   */
+  rollPads() {
+    this.pads = [];
+    if (!(CFG.padEvery > 0)) return;
+    const avoid = this.nozzleOff.map((o) => o * D);
+    const pick = () => {
+      for (let t = 0; t < 60; t++) {
+        const s = this.rng() * L;
+        if (avoid.every((a) => circDist(s, a, L) > CFG.padAvoid * D) &&
+            this.pads.every((p) => circDist(s, p.s, L) > 7 * D)) return s;
+      }
+      return this.rng() * L;
+    };
+    this.pads.push({ s: pick() });
+    this.pads.push({ s: pick() });
+  }
+
   // ---- 消除 + 连锁 + 连消 ----
   resolve(startSlot = -1, off = 0) {
     let chain = 0;
@@ -397,17 +649,41 @@ export class Game {
         this.events.push({ type: 'combo', combo: this.combo });
       }
 
+      // 消除段两侧的锈球被震碎，一起并进本次清除。
+      // 必须并进**同一段**：如果单独删掉侧面的锈球，链条中间就会留下洞，
+      // 而链条连续是这个游戏所有判定的前提（插入推挤、compact、吸附都假定它）。
+      let start = run.start, len = run.len;
+      let rustN = 0;
+      if (len < N) {
+        const lb = this.slots[mod(start - 1, N)];
+        if (lb && lb.ci === RUST) { start = mod(start - 1, N); len++; rustN++; }
+      }
+      if (len < N) {
+        const rb = this.slots[mod(run.start + run.len, N)];
+        if (rb && rb.ci === RUST) { len++; rustN++; }
+      }
+
+      const s0 = mod(start + this.phase, N) * D;
+      // ×2 槽的判定点是消除段的**中心弧长**，不是落点。
+      // 玩家要瞄的是"让这一下消在槽里"，而不是"把球打进槽里"——差别很大。
+      let padHit = false;
+      for (const pad of this.pads) {
+        if (circDist(mod(s0 + len * 0.5 * D, L), pad.s, L) <= CFG.padHalf * D) { padHit = true; break; }
+      }
+      if (padHit) this.padHits++;
+
       const chainMult = CHAIN_MULT[Math.min(chain - 1, CHAIN_MULT.length - 1)];
       const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
-      const base = BASE_SCORE(run.len);
-      const gain = Math.round(base * chainMult * comboMult);
+      const base = BASE_SCORE(run.len) + rustN * 200;
+      const padMult = padHit ? 2 : 1;
+      const gain = Math.round(base * chainMult * comboMult * padMult);
       this.score += gain;
       this.clears++;
 
       const colors = [];
       const positions = [];
-      for (let i = 0; i < run.len; i++) {
-        const idx = mod(run.start + i, N);
+      for (let i = 0; i < len; i++) {
+        const idx = mod(start + i, N);
         const b = this.slots[idx];
         colors.push(b.ci);
         positions.push(mod(idx + this.phase, N) * D);
@@ -415,13 +691,12 @@ export class Game {
       }
 
       this.events.push({
-        type: 'clear', chain, gain, base, chainMult, comboMult,
-        colors, positions, len: run.len, off,
-        s0: mod(run.start + this.phase, N) * D,
+        type: 'clear', chain, gain, base, chainMult, comboMult, padMult, padHit, rustN,
+        colors, positions, len, off, s0,
         combo: this.combo,
       });
 
-      this.compact(run.start, run.len);
+      this.compact(start, len);
     }
 
     if (chain > 0) {
@@ -444,6 +719,9 @@ export class Game {
     for (let i = 0; i < N; i++) {
       const b = this.slots[i];
       if (!b) continue;
+      // 锈球不参与任何颜色匹配，哪怕三颗锈球挨在一起也不能消——
+      // 它是"死重"，唯一的出口是被相邻消除震碎或被炸弹炸掉。
+      if (b.ci === RUST) continue;
       const prev = this.slots[mod(i - 1, N)];
       if (prev && prev.ci === b.ci) continue;
 

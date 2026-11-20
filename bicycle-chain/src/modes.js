@@ -63,14 +63,20 @@ export const MODES = [
     blurb: '双射口 · 相距半圈',
     geo: { r: 4, c: 6, n: 28 },
     layout: 2,
-    // 机器人 20 局（flightTime 0.66）：p10≈6100 p25≈6900 p50≈7700 p75≈8400 p90≈9700
-    tiers: [0, 5700, 6800, 7900, 9600],
+    // 机器人 40 局（4 色 + 特殊球 + ×2 槽）：p10≈11700 p25≈13800 p50≈15300 p75≈18600 p85≈21700
+    tiers: [0, 11800, 13800, 15800, 20000],
     cfg: {
       stages: [[0, 1], [20, 2]],
       beatStart: 3.40, beatEnd: 2.05, rampSec: 90, levelTime: 90,
-      startBeads: 8, colorSteps: [[0, 4], [45, 5]],
+      startBeads: 8,
+      // 只有 4 个基础色：前 38 秒三色（好上手），之后上第四色。
+      // 难度改由节拍 + 锈球承担，而不是"再多一个颜色"——多一个色相在
+      // 色弱玩家眼里等于没有变化，只会增加随机性。
+      colorSteps: [[0, 4]],
       vMax: 13, drift: 1.35, accel: 55,
       volley: 2, rotate: false,
+      specialStart: 15, wildRate: 0.05, bombRate: 0.042,
+      rustStart: 24, rustEvery: 8,
     },
   },
   {
@@ -80,14 +86,19 @@ export const MODES = [
     blurb: '单射口 · 20 格短局',
     geo: { r: 3, c: 4.5, n: 20 },
     layout: 1,
-    // 机器人 20 局（flightTime 0.66）：p10≈3400 p25≈3900 p50≈4100 p75≈5000 p90≈6600
-    tiers: [0, 3400, 4050, 4750, 5700],
+    // 机器人 40 局：p10≈5300 p25≈6000 p50≈6800 p75≈8500 p85≈9500
+    tiers: [0, 5300, 6000, 6900, 9000],
     cfg: {
       stages: [[0, 1]],
       beatStart: 2.50, beatEnd: 1.50, rampSec: 60, levelTime: 60,
-      startBeads: 5, colorSteps: [[0, 3], [12, 4]],
+      startBeads: 5,
+      // 20 格的小盘只给三色：四色在这么短的链条上等于每两拍就卡死一次。
+      colorSteps: [[0, 3], [14, 4]],
       vMax: 11, drift: 1.20, accel: 50,
       volley: 1, rotate: false,
+      // 短局给得更保守：60 秒里塞 4 颗锈球就够，再多会盖过"练习"的定位。
+      specialStart: 12, wildRate: 0.06, bombRate: 0.05,
+      rustStart: 24, rustEvery: 11,
     },
   },
   {
@@ -97,14 +108,18 @@ export const MODES = [
     blurb: '40 格 · 双射口长局',
     geo: { r: 5.5, c: 9, n: 40 },
     layout: 2,
-    // 机器人 20 局（flightTime 0.66）：p10≈7900 p25≈8600 p50≈10800 p75≈12700 p90≈14800
-    tiers: [0, 8000, 9500, 10800, 12600],
+    // 机器人 40 局：p10≈14300 p25≈15800 p50≈17300 p75≈20000 p85≈20800
+    tiers: [0, 14300, 15900, 17400, 20800],
     cfg: {
       stages: [[0, 1], [25, 2]],
       beatStart: 3.80, beatEnd: 2.20, rampSec: 120, levelTime: 120,
-      startBeads: 12, colorSteps: [[0, 4], [60, 5]],
+      startBeads: 12,
+      colorSteps: [[0, 4]],
       vMax: 15.4, drift: 1.50, accel: 60,
       volley: 2, rotate: false,
+      // 40 格大盘最耐得住脏，锈球可以密一点，正好用掉它的空间优势。
+      specialStart: 18, wildRate: 0.05, bombRate: 0.042,
+      rustStart: 26, rustEvery: 7,
     },
   },
   {
@@ -114,17 +129,20 @@ export const MODES = [
     blurb: '三分环 · 轮转两发',
     geo: { r: 4.6, c: 6.5, n: 30 },
     layout: 3,
-    // 机器人 20 局（flightTime 0.66）：p10≈5600 p25≈6000 p50≈6500 p75≈7100 p90≈7900
-    tiers: [0, 5600, 6400, 7200, 8300],
+    // 机器人 40 局：p10≈7700 p25≈8100 p50≈9000 p75≈11000 p85≈12100
+    tiers: [0, 7700, 8700, 9800, 11500],
     cfg: {
       stages: [[0, 1], [12, 2], [30, 3]],
       beatStart: 3.90, beatEnd: 2.60, rampSec: 75, levelTime: 75,
-      startBeads: 12, colorSteps: [[0, 4]],
+      startBeads: 12,
+      colorSteps: [[0, 3], [24, 4]],
       vMax: 12, drift: 1.30, accel: 50,
       // 三个落点若每拍全开，每拍落 3 球而 30 格给不出 3 组三消——
       // 结构上必死。所以三射口本身「轮转两发」：每拍有且只有一个口休息，
       // 下一个节拍换一个口休息。三个落点仍然全部参与，压力却回到 2 球/拍。
       volley: 2, rotate: true,
+      specialStart: 14, wildRate: 0.055, bombRate: 0.045,
+      rustStart: 24, rustEvery: 9,
     },
   },
 ];

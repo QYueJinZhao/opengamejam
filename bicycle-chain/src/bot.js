@@ -4,11 +4,11 @@
 // 它的打法是「预测落点 + 提前量」：算清楚松手后球会漂到哪，再决定往哪转。
 // 这不是完美 AI，但足够当作平衡探针与视觉调试样本。
 
-import { CFG } from './sim.js';
+import { CFG, PALETTE, WILD, BOMB } from './sim.js';
 import { N, mod } from './geom.js';
 
 /** 一个槽位对某色的收益：贴边 30、隔一 12、夹心 80、同色叠 15 */
-export function evalSlot(at, k, ci) {
+function evalColor(at, k, ci) {
   const l1 = at(k - 1), r1 = at(k + 1), l2 = at(k - 2), r2 = at(k + 2);
   let sc = 0;
   if (l1 && l1.ci === ci) sc += 30;
@@ -20,6 +20,26 @@ export function evalSlot(at, k, ci) {
   if (c === null) sc += 4;
   else if (c.ci === ci) sc += 15;
   return sc;
+}
+
+/**
+ * 一个槽位对某颗待发球的收益。
+ * 特殊球没有颜色，必须有自己的评估函数——否则机器人会把万能球当"无色的球"
+ * 随便丢，把炸弹丢到空跑道上，然后测试跑出来的分数就不是"玩家能打的分数"。
+ */
+export function evalSlot(at, k, ci) {
+  if (ci === BOMB) {
+    let n = 0;
+    for (let i = -2; i <= 2; i++) if (at(k + i)) n++;
+    return n * 26;
+  }
+  if (ci === WILD) {
+    let best = -1e9;
+    for (let c = 0; c < PALETTE.length; c++) best = Math.max(best, evalColor(at, k, c));
+    // 打九折：万能球落地才定型，比手里就攥着的真彩球弱一点
+    return best * 0.9;
+  }
+  return evalColor(at, k, ci);
 }
 
 /** 返回本帧应该按住的转向：1 / 0 / -1 */

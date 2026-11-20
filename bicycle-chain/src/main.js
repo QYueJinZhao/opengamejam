@@ -23,6 +23,9 @@ const botOn = params.get('bot') === '1';
 // 每次 new Game 都会用 Object.assign(CFG, BASE_CFG, mode.cfg) 重置。
 const ftParam = Number(params.get('ft') || 0);
 if (ftParam > 0) BASE_CFG.flightTime = Math.max(0.2, Math.min(1.4, ftParam));
+// ?pads=0 关掉 ×2 得分槽。设计稿里这个模块本来就要"可独立控制显隐"，
+// 关掉之后分数会整体下降，段位线也会失真——所以它只当调试开关，不进设置面板。
+if (params.get('pads') === '0') BASE_CFG.padEvery = 0;
 
 // ---------- 本地记录 ----------
 const BEST_KEY = 'bcj.best.v2';
@@ -60,8 +63,18 @@ let silent = false;
 // 初速不变而寿命变长，碎片会飘出跑道、飞到 HUD 上，看着像漏液而不是爆炸。
 // 所以"慢"的做法是「初速降下来 + 寿命拉长 + 阻尼减小」，让它慢慢铺开、慢慢落，
 // 而不是原速飞更久。重力同步降低，否则滞空时间一长就变成往下掉。
+const PART_RGB = {
+  0: '168,85,247',   // 紫
+  1: '255,194,58',   // 金
+  2: '255,59,78',    // 红
+  3: '25,211,240',   // 青
+  10: '255,226,130', // 万能
+  11: '255,150,50',  // 爆破
+  12: '150,140,125', // 锈
+};
+
 function burst(x, y, ci, count = 9, power = 1) {
-  const rgb = ['255,77,90', '63,169,255', '255,197,61', '178,107,255', '18,224,184'][ci] || '255,255,255';
+  const rgb = PART_RGB[ci] || '255,255,255';
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2;
     const sp = (44 + Math.random() * 196) * power;
@@ -130,6 +143,9 @@ function handleEvents() {
       }
 
       float(`+${e.gain}`, mid.x, mid.y - 30, e.chain >= 2 ? 32 : 26, e.chain >= 2 ? '#FFD65A' : '#E8F0FA');
+      if (e.padHit) {
+        float('×2 双倍', mid.x, mid.y - 58, 20, '#FFD65A');
+      }
       if (e.chain >= 2) {
         float(`连锁 ×${e.chainMult.toFixed(1)}`, mid.x, mid.y - 64, 18, '#FFD65A');
       }
@@ -140,6 +156,33 @@ function handleEvents() {
       fx.shake = Math.min(26, fx.shake + 2.2 + e.chain * 2.4 + Math.min(6, e.combo * 0.3));
       fx.flash = Math.min(0.42, fx.flash + 0.03 + e.chain * 0.02);
       if (!silent) sfx.clear(e.chain, e.combo);
+    } else if (e.type === 'bomb') {
+      // 爆破球：演出必须比三消更"钝"。三消是清脆的（光带 + 琶音），
+      // 爆破是低频的（大冲击波 + 慢闪 + 闷响），两者靠质感区分而不是靠音量。
+      const p = arcToScreen(e.s);
+      shock(p.x, p.y, 8, 150, 0.62, 'rgba(255,150,60,ALPHA)', 5);
+      shock(p.x, p.y, 4, 74, 0.4, 'rgba(255,235,190,ALPHA)', 2.5);
+      for (let i = 0; i < (e.hit || 0); i++) {
+        if (!e.positions || e.positions[i] === undefined) continue;
+        const q = arcToScreen(e.positions[i]);
+        burst(q.x, q.y, e.col[i], 10, 1.4);
+        ghost(q.x, q.y, e.col[i], 0.4);
+      }
+      fx.shake = Math.min(30, fx.shake + 12);
+      fx.flash = Math.min(0.46, fx.flash + 0.12);
+      if (e.hit > 0) float(`爆破 +${e.gain}`, p.x, p.y - 34, 26, '#FFB44A');
+      if (!silent) sfx.boom();
+    } else if (e.type === 'rust') {
+      const p = arcToScreen(e.s);
+      shock(p.x, p.y, 3, 26, 0.34, 'rgba(150,140,125,ALPHA)', 2);
+      float('锈球', p.x, p.y - 26, 13, 'rgba(198,188,174,0.9)');
+      if (!silent) sfx.clank();
+    } else if (e.type === 'padmove') {
+      for (const pad of game.pads) {
+        const p = arcToScreen(pad.s);
+        shock(p.x, p.y, 5, 34, 0.5, 'rgba(255,214,90,ALPHA)', 2);
+      }
+      float('×2 换位', 600, 700, 15, 'rgba(255,214,90,0.85)');
     } else if (e.type === 'combo') {
       if (!silent && (e.combo === 3 || e.combo === 6 || e.combo === 10)) {
         sfx.rushUp(e.combo);
