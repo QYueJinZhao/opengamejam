@@ -1,6 +1,6 @@
 {
   "name": "bicycle-chain-zuma",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Bicycle-Chain Reverse Zuma — 2D prototype (M2: 4 modes, combo, BGM)",

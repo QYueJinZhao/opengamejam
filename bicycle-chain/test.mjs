@@ -44,13 +44,29 @@ function botInput(game) {
     if (sc > bestSc) { bestSc = sc; bestPhase = q; }
   }
 
-  const lead = Math.max(0, game.beat - game.beatClock) + CFG.flightTime;
-  let need = bestPhase - game.phase;
-  while (need > N / 2) need -= N;
-  while (need < -N / 2) need += N;
-  const nv = Math.max(-CFG.vMax, Math.min(CFG.vMax, need / Math.max(lead, 0.08)));
-  if (nv > game.v + 0.6) return 1;
-  if (nv < game.v - 0.6) return -1;
+  // 截止时刻：有球在飞时，真正的截止是「它落地」，不是「下一拍发射」。
+  // T 设下限 0.30：否则临近落地时增益 1/T 会发散，机器人每帧满速乱撞。
+  const T = Math.max(0.30, game.balls.length
+    ? CFG.flightTime - game.balls[0].t
+    : (game.beat - game.beatClock) + CFG.flightTime);
+
+  // 会预测漂移的控制器（人类玩家的打法）：先算"如果现在松手，落地时相位会在哪"，
+  // 它永远以 drift 前进、不会停住，所以瞄准必须带提前量：
+  //   v(t) = drift + (v-drift)e^{-kt}  →  位移可解析积分，不用逐步模拟
+  const k = CFG.dampK, drift = CFG.drift;
+  const coast = drift * T + (game.v - drift) * (1 - Math.exp(-k * T)) / k;
+  let err = bestPhase - (game.phase + coast);
+  while (err > N / 2) err -= N;
+  while (err < -N / 2) err += N;
+
+  // 发射后收手：飞行期间不再改向。这是球变慢之后新增的必要纪律 ——
+  // 边飞边改会把自己的落点带偏。实测 0.36s 飞行下，这条把存活从 6/16 拉回 14/16。
+  if (game.balls.length) return 0;
+
+  // 在 T 内补上 err 需要的平均速度（漂移是底，追加量叠在上面）
+  const nv = Math.max(-CFG.vMax, Math.min(CFG.vMax, drift + err / T));
+  if (nv > game.v + 0.45) return 1;
+  if (nv < game.v - 0.45) return -1;
   return 0;
 }
 

@@ -112,7 +112,7 @@ export class Renderer {
     ctx0.save();
     ctx0.globalAlpha = boardAlpha;
     this.beads(game, ui);
-    this.reticle(game);
+    this.reticle(game, ui);
     this.projectile(game);
     this.nozzle(game, ui);
     ctx0.restore();
@@ -257,12 +257,28 @@ export class Renderer {
   }
 
   // ---------- 珠子 ----------
+  // 预测命中槽：按"现在松手"，球落地时炮口下会是哪个槽位。
+  predSlots(game) {
+    // 只在"即将发射 / 已经发射"时才预告：没有球在飞的时候，
+    // 松手预测要跨过整整一拍（2-3 秒、4 格以上），那已经不是玩家在做的决定了。
+    const imminent = game.beat - game.beatClock < 0.55;
+    if (!game.balls.length && !imminent) return [];
+    const coast = this.coastSlots(game);
+    // 只预告真的会开火的那几个口：三射口模式下有一个口在轮休，
+    // 给休息的口也画环，等于告诉玩家"它会打这里"，是错的。
+    const offs = game.balls.length
+      ? game.balls.map((b) => b.off)
+      : game.nextVolley().map((i) => game.nozzleOff[i]);
+    return offs.map((off) => mod(Math.round(-(game.phase + coast)) + off, N));
+  }
+
   beads(game, ui) {
     const slots = [];
     for (let i = 0; i < N; i++) {
       const b = game.slots[i];
       if (b) slots.push([i, b]);
     }
+    const pred = this.predSlots(game);
     for (const pass of [0, 1]) {
       for (const [i, b] of slots) {
         const s = mod((i + b.dx) + game.phase, N) * D;
@@ -271,22 +287,60 @@ export class Renderer {
         this.drawBead(s, b, near, ui.cb);
       }
     }
+    // 命中环最后画，永远压在珠子之上（不受两趟渲染顺序影响）
+    for (const [i, b] of slots) {
+      if (!pred.includes(i)) continue;
+      this.hitRing(mod((i + b.dx) + game.phase, N) * D, b);
+    }
   }
 
+  // 现在松手 → 落地时链条会滑过多少格。必须和 sim 的漂移阻尼算法一致：
+  // 松手后 v 不是归零，而是衰减到 drift，所以位移要解析积分，不能拿 |v|×t 糊。
+  // 幽灵球与珠链高亮共用这一个值，否则两处提示会互相打架。
+  coastSlots(game) {
+    const T = game.balls.length
+      ? Math.max(0, CFG.flightTime - game.balls[0].t)
+      : (game.beat - game.beatClock) + CFG.flightTime;
+    const k = CFG.dampK, drift = CFG.drift;
+    return drift * T + (game.v - drift) * (1 - Math.exp(-k * T)) / k;
+  }
+
+  // 落点预警：标出"球飞到时正好在炮口下的那颗"，而不是"现在挨着炮口的那颗"。
+  // 之前峰值落在 dist=0（即将离开炮口的那颗），球越慢这个错越明显。
   arrivalAlpha(game, s) {
-    const v = game.v;
-    const av = Math.abs(v);
-    if (av < 0.08) return 0;
+    const coast = this.coastSlots(game);
+    const ac = Math.abs(coast);
+    if (ac < 0.05) return 0;
     const p = s / D;
-    const reach = av * CFG.flightTime;
     let best = 0;
     for (let i = 0; i < game.nozzleOff.length; i++) {
       const tgt = mod(-game.phase + game.nozzleOff[i], N);
-      const dist = v > 0 ? mod(tgt - p, N) : mod(p - tgt, N);
-      if (dist > reach) continue;
-      best = Math.max(best, 1 - dist / Math.max(reach, 0.001) * 0.75);
+      const dist = coast > 0 ? mod(tgt - p, N) : mod(p - tgt, N);
+      const d = Math.abs(dist - ac);
+      if (d > 0.55) continue;
+      best = Math.max(best, 1 - (d / 0.55) * 0.72);
     }
     return best;
+  }
+
+  // 会被命中的那颗珠：一圈亮环。飞行变慢后落点会跟着带速漂移，
+  // 没有这个环，玩家只能靠"差一点"的挫败感去反推提前量。
+  hitRing(s, b) {
+    const ctx = this.ctx;
+    const p = this.toScreen(pointAt(s));
+    const c = PALETTE[b.ci];
+    const pulse = 0.5 + 0.5 * Math.sin(this.t * 6.5);
+
+    ctx.save();
+    // 白环 + 珠色外发光：纯珠色环在红珠上几乎看不见，白色才在任何底色上都成立
+    ctx.shadowColor = c.base;
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, BEAD_R + 6.5, 0, PI2);
+    ctx.strokeStyle = `rgba(255,255,255,${0.58 + 0.34 * pulse})`;
+    ctx.lineWidth = 2.6;
+    ctx.stroke();
+    ctx.restore();
   }
 
   drawBead(s, b, near, cb) {
@@ -455,19 +509,27 @@ export class Renderer {
   }
 
   // ---------- 落点 ----------
-  reticle(game) {
+  reticle(game, ui) {
     const n = game.nozzleCount();
     const active = game.nextVolley();
     for (let i = 0; i < n; i++) {
       if (!active.includes(i)) continue;
-      this.reticleAt(game, i);
+      this.reticleAt(game, i, ui);
     }
   }
 
-  reticleAt(game, idx) {
+  reticleAt(game, idx, ui) {
     const ctx = this.ctx;
     const p = this.toScreen(IMPACTS[idx]);
     const pulse = 0.5 + 0.5 * Math.sin(this.t * 5 + idx * 1.9);
+
+    // 落点预览：按当前速度推算「球飞到的瞬间，炮口下会是哪颗珠」。
+    // 球慢了之后这段提前量接近半格，不画出来玩家只能靠试错去猜。
+    // "现在松手 → 球会落在哪颗珠上"：这才是玩家真正要做的那个决定
+    const predSlot = mod(Math.round(-(game.phase + this.coastSlots(game))) + game.nozzleOff[idx], N);
+    const predBead = game.slots[predSlot] || null;
+    // 落点预览不画在准星上：准星正中是炮口里待发的那颗球，任何预览都会被挡掉。
+    // 改成在链条上圈住"会被命中的那颗珠"（见 beads()），一眼就能对上。
 
     const dropSlot = game.impactSlot(game.nozzleOff[idx]);
     if (game.slots[dropSlot] === null) {
@@ -514,15 +576,20 @@ export class Renderer {
     ctx.restore();
     ctx.setLineDash([]);
 
-    ctx.strokeStyle = 'rgba(180,225,255,0.5)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(p.x - 7, p.y); ctx.lineTo(p.x + 7, p.y);
-    ctx.moveTo(p.x, p.y - 7); ctx.lineTo(p.x, p.y + 7);
-    ctx.stroke();
+    if (!predBead) {
+      ctx.strokeStyle = 'rgba(180,225,255,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(p.x - 7, p.y); ctx.lineTo(p.x + 7, p.y);
+      ctx.moveTo(p.x, p.y - 7); ctx.lineTo(p.x, p.y + 7);
+      ctx.stroke();
+    }
   }
 
   // ---------- 飞行球 ----------
+  // 轨迹：出膛快 → 临近链条减速，再叠一个向外的抛物线弧度。
+  // 缓动曲线用缓出（ease-out）而不是缓入缓出：smoothstep 在中段速度是平均值的 1.5 倍，
+  // 正是那一下"窜"让 0.2 秒的飞行看起来像瞬移。
   projectile(game) {
     for (let i = 0; i < game.balls.length; i++) this.drawProjectile(game, game.balls[i]);
   }
@@ -531,27 +598,36 @@ export class Renderer {
     const ctx = this.ctx;
     const c = PALETTE[ball.ci];
     const k = Math.min(1, ball.t / CFG.flightTime);
-    const ease = k * k * (3 - 2 * k);
 
     const from = NOZZLES[ball.idx] || NOZZLES[0];
     const to = IMPACTS[ball.idx] || IMPACTS[0];
     if (!from || !to) return;
-    const x = from.x + (to.x - from.x) * ease;
-    const y = from.y + (to.y - from.y) * ease;
-    const p = this.toScreen({ x, y });
+
+    // 同一套路径函数：球体和尾迹必须走同一条曲线，否则尾迹会脱轨
+    const pos = (u) => {
+      // 半线性 + 半 smoothstep：接近匀速，两端各有一点起落，中段不会像
+      // 纯 smoothstep 那样窜（峰值 1.5 倍速）——那正是"一闪就到"的来源。
+      const sm = u * u * (3 - 2 * u);
+      const e = 0.5 * u + 0.5 * sm;
+      // 弧线沿切线方向（垂直于出膛方向）。早先沿外法向鼓，正好顶在前进方向的反面，
+      // 球看起来像"卡在炮口没动"。
+      const arc = Math.sin(Math.PI * Math.min(1, u)) * 0.46;   // 世界单位
+      return this.toScreen({
+        x: from.x + (to.x - from.x) * e + from.tx * arc,
+        y: from.y + (to.y - from.y) * e + from.ty * arc,
+      });
+    };
 
     for (let i = 5; i >= 1; i--) {
-      const kk = Math.max(0, ease - i * 0.035);
-      const tp = this.toScreen({
-        x: from.x + (to.x - from.x) * kk,
-        y: from.y + (to.y - from.y) * kk,
-      });
+      const u = Math.max(0, k - i * 0.055);
+      const tp = pos(u);
       ctx.beginPath();
       ctx.arc(tp.x, tp.y, BEAD_R * (1 - i * 0.1), 0, PI2);
       ctx.fillStyle = c.base + Math.round(56 - i * 9).toString(16).padStart(2, '0');
       ctx.fill();
     }
 
+    const p = pos(k);
     const g = ctx.createRadialGradient(p.x, p.y, 2, p.x, p.y, BEAD_R * 1.55);
     g.addColorStop(0, c.light);
     g.addColorStop(0.45, c.base + '7A');
