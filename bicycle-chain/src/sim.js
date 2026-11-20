@@ -1,45 +1,59 @@
 // 纯逻辑层：无 DOM、无渲染、无随机时间源，可在 Node 里直接跑。
 // 固定步长驱动，同种子同输入 → 完全确定。
 //
-// M1 关键变更：单喷头 → 双喷头。
-// 两个落点在 slot 坐标下相距半圈（N/2），共用同一个 phase：
-//   phase 为 0 时，主落点压在 slot 0，副落点压在 slot 14。
-// 也就是说「转动轮盘」这一个动作，会同时把两段珠链送到各自落点上——
-// 玩家永远无法两边都照顾到，机会成本是结构性的，不靠惩罚规则堆出来。
+// 结构与上一版的关键差异：
+// 1. 每个射口有一个 3 球预览队列（当前 + 下两颗），玩家能提前规划；
+// 2. 射口数量 / 落点间距 / 轮径 / 槽数全部由 modes.js 决定；
+// 3. 三射口模式「轮转两发」：每拍只有一个口休息，下拍换一个，压力仍是 2 球/拍；
+// 4. 新增跨节拍连击 RUSH：连续每拍都有消除才涨，断一拍就归零，是主要得分杠杆。
 
-import { L, N, D, mod } from './geom.js';
+import { N, D, mod, configure } from './geom.js';
+import { getMode } from './modes.js';
 
+// ---- 球种：色相 + 明度 + 内部纹样 + 中心形符，四重编码 ----
+// 目的：色弱玩家靠「纹样 + 形符 + 明暗」也能区分，不依赖色相。
 export const PALETTE = [
-  { key: 'r', base: '#FF4D5A', light: '#FFA7AE', dark: '#8E1B26', glyph: 'circle',   name: '红' },
-  { key: 'b', base: '#3FA9FF', light: '#A6D8FF', dark: '#124E80', glyph: 'triangle', name: '蓝' },
-  { key: 'g', base: '#FFC53D', light: '#FFE9A8', dark: '#8A5C00', glyph: 'square',   name: '金' },
-  { key: 'p', base: '#B26BFF', light: '#DFC0FF', dark: '#5A2A93', glyph: 'diamond',  name: '紫' },
-  { key: 'c', base: '#2FE6C8', light: '#A8FFF2', dark: '#0B6B5C', glyph: 'cross',    name: '青' },
+  { key: 'r', name: '红', base: '#FF3B4E', light: '#FFA6B0', dark: '#7C0F1A', glyph: 'dot',     pat: 'ring',   ink: '#FFF4F5' },
+  { key: 'b', name: '蓝', base: '#2E86FF', light: '#A9CFFF', dark: '#0A3A78', glyph: 'tri',     pat: 'stripe', ink: '#F4F8FF' },
+  { key: 'g', name: '金', base: '#FFC93C', light: '#FFF0B8', dark: '#7F5200', glyph: 'square',  pat: 'plate',  ink: '#2B1D00' },
+  { key: 'p', name: '紫', base: '#A855F7', light: '#DCB6FF', dark: '#42157F', glyph: 'diamond', pat: 'dots',   ink: '#FFF0FF' },
+  { key: 'c', name: '青', base: '#12E0B8', light: '#9BFFF1', dark: '#045348', glyph: 'cross',   pat: 'double', ink: '#00241E' },
 ];
 
-/** 两个喷头的落点偏移（slot 单位），相距半圈 */
-export const NOZZLE_OFF = [0, N / 2];
-
-export const CFG = {
-  vMax: 13.0,          // 最大带速（格/秒）
-  accel: 55.0,         // 线加速度（格/秒²）
-  dampK: 9.0,          // 松手阻尼系数（1/秒）—— 帧率无关
-  drift: 1.35,         // 基础带速：皮带永远在走，防"原地堆珠"
-  stopEps: 0.12,       // 停机阈值
-  brakeMagnet: 4.0,    // 低于此速度按急停可磁吸对齐
-  flightTime: 0.203,   // 飞行时长（秒）
-  beatStart: 3.40,     // 双喷头信息量翻倍，起手节拍必须放松
+export const BASE_CFG = {
+  vMax: 13.0,
+  accel: 55.0,
+  dampK: 9.0,
+  drift: 1.35,
+  stopEps: 0.12,
+  brakeMagnet: 4.0,
+  flightTime: 0.203,
+  beatStart: 3.40,
   beatEnd: 2.05,
   rampSec: 90,
   levelTime: 90,
-  nozzle2At: 20,       // 20 秒前只有顶部一个喷头，先教会"接球"再教"取舍"
-  startBeads: 8,       // 两段各 4 颗，各自跨过自己的落点
-  // 颜色解锁阶梯：[时间, 颜色数]。3 色太容易消、盘面抽干，直接从 4 色起手
+  startBeads: 8,
   colorSteps: [[0, 4], [45, 5]],
+  stages: [[0, 1], [20, 2]],
+  volley: 2,
+  rotate: false,
 };
 
-const CHAIN_MULT = [1, 2, 4, 8, 12];
+export const CFG = { ...BASE_CFG };
+
+const CHAIN_MULT = [1, 1.6, 2.6, 4.2, 6.5, 9.0];
+// 连消倍率：按累计消除数递增，2.6 秒内没有新消除就断。
+// 之所以不按「每拍都必须消」来算，是因为实测每拍平均只有 0.56 次消除，
+// 那个条件等于永远拿不到加成（机器人峰值连击只有 3.6）。
+const COMBO_MULT = [1, 1, 1.1, 1.2, 1.35, 1.5, 1.65, 1.8, 2.0, 2.2, 2.4, 2.6, 2.9, 3.2, 3.5, 3.8, 4.1, 4.4, 4.7, 5.0, 5.3];
+const COMBO_WINDOW = 3.0;
 const BASE_SCORE = (n) => (n === 3 ? 300 : n === 4 ? 500 : 800 + 400 * Math.max(0, n - 5));
+const SWEEP_BONUS = 1500;
+
+/** 连消倍率（渲染层与逻辑层共用同一张表，避免 HUD 显示和实际结算不一致） */
+export function comboMult(n) {
+  return COMBO_MULT[Math.min(Math.max(n, 0), COMBO_MULT.length - 1)];
+}
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -55,7 +69,16 @@ export function mulberry32(seed) {
 let beadSeq = 1;
 
 export class Game {
-  constructor(seed = 20261120) {
+  constructor(seed = 20261120, modeId = 'standard') {
+    this.mode = getMode(modeId);
+    this.modeId = this.mode.id;
+    // 先改几何，再建盘面：N / D 是 live binding，后面所有代码读到的都是新值
+    configure(this.mode.geo);
+    this.nozzleOff = Array.from(
+      { length: this.mode.layout },
+      (_, i) => Math.round((i * N) / this.mode.layout)
+    );
+    Object.assign(CFG, BASE_CFG, this.mode.cfg);
     this.seed = seed;
     this.reset();
   }
@@ -63,49 +86,73 @@ export class Game {
   reset() {
     this.rng = mulberry32(this.seed);
     this.slots = new Array(N).fill(null);
-    this.phase = 0;          // 单位：槽（连续）
-    this.v = 0;              // 格/秒
+    this.phase = 0;
+    this.v = 0;
     this.input = 0;
     this.time = 0;
     this.beatClock = 0;
     this.beat = CFG.beatStart;
-    this.balls = [];         // 飞行中的球组：{ ci, off, t }
-    this.nozzleCi = [0, 0];  // 两个喷头的待发色
+    this.balls = [];
+
+    // 每个射口独立的三球队列：queues[i][0] 是待发球，[1][2] 是预览
+    this.queues = Array.from({ length: this.mode.layout }, () => [
+      this.pickColor(), this.pickColor(), this.pickColor(),
+    ]);
 
     this.score = 0;
     this.chain = 0;
     this.chainT = -99;
     this.maxChain = 0;
-    this.combo = 0;          // 连续有效接球
-    this.shots = 0;          // 发球次数（按拍计）
-    this.drops = 0;          // 落球总颗数
+    this.combo = 0;          // 连消：累计消除数，窗口内没有新消除才断
+    this.comboT = -99;
+    this.maxCombo = 0;
+    this.volleyIndex = 0;    // 三射口：下一个休息的口
+    this.shots = 0;
+    this.drops = 0;
     this.clears = 0;
-    this.lone = 0;           // 落空次数（整盘全空，极小概率）
-    this.snapped = 0;        // 落点为空、球吸附到最近珠子的次数
+    this.lone = 0;
+    this.snapped = 0;
+    this.sweeps = 0;
     this.dead = false;
     this.deadReason = null;
     this.events = [];
-    this.fx = [];
 
-    // 开局阵型：两段珠链，各自以自己的落点为中心展开；段内不出现现成三连
-    const half = Math.max(2, Math.floor(CFG.startBeads / 2));
-    const back = Math.floor(half / 2);
-    const layout = [];
-    for (let i = 0; i < half; i++) layout.push(i - back);
-    for (let i = 0; i < half; i++) layout.push(N / 2 + i - back);
+    this.placeOpening();
+  }
+
+  // 开局阵型：每个落点周围铺一段，段内不允许出现现成三连
+  placeOpening() {
+    const offs = this.nozzleOff.slice(0, this.mode.layout);
+    const per = Math.max(2, Math.floor(CFG.startBeads / offs.length));
+    const back = Math.floor(per / 2);
     const maxCi = this.colorCount();
-    let p1 = -1, p2 = -1;
-    for (const idx of layout) {
-      let c = 0;
-      for (let tries = 0; tries < 24; tries++) {
-        c = Math.floor(this.rng() * maxCi);
-        if (!(c === p1 && c === p2)) break;
+    for (const off of offs) {
+      for (let i = 0; i < per; i++) {
+        const idx = mod(off + i - back, N);
+        let ci = 0;
+        for (let tries = 0; tries < 30; tries++) {
+          ci = Math.floor(this.rng() * maxCi);
+          if (!this.wouldTriple(idx, ci)) break;
+        }
+        this.slots[idx] = this.makeBead(ci);
       }
-      this.slots[mod(idx, N)] = this.makeBead(c);
-      p2 = p1;
-      p1 = c;
     }
-    this.nozzleCi = [this.pickColor(), this.pickColor()];
+  }
+
+  wouldTriple(idx, ci) {
+    const at = (j) => {
+      if (j === idx) return ci;
+      const b = this.slots[mod(j, N)];
+      return b ? b.ci : -1;
+    };
+    for (let s = -2; s <= 0; s++) {
+      let ok = true;
+      for (let k = 0; k < 3; k++) {
+        if (at(idx + s + k) !== ci) { ok = false; break; }
+      }
+      if (ok) return true;
+    }
+    return false;
   }
 
   makeBead(ci) {
@@ -124,12 +171,26 @@ export class Game {
     return Math.min(n, PALETTE.length);
   }
 
-  /** 当前激活的喷头数：前 20 秒只有一个落点 */
+  /** 当前激活的射口数 */
   nozzleCount() {
-    return this.time >= CFG.nozzle2At ? 2 : 1;
+    let n = 1;
+    for (const [t, c] of CFG.stages) if (this.time >= t) n = c;
+    return Math.min(n, this.mode.layout);
   }
 
-  // ---- 发色权重：按场上存量加权，冷门色不连出超过 2 发 ----
+  /** 下一拍实际开火的射口（三射口模式会轮休一个） */
+  nextVolley() {
+    const n = this.nozzleCount();
+    if (!CFG.rotate || n < 3) {
+      return Array.from({ length: n }, (_, i) => i);
+    }
+    const v = Math.min(CFG.volley ?? 2, n);
+    const out = [];
+    for (let k = 0; k < v; k++) out.push((this.volleyIndex + k) % n);
+    return out;
+  }
+
+  // ---- 发色权重：按场上存量加权，冷门色强制召回 ----
   pickColor() {
     const maxCi = this.colorCount();
     const count = new Array(PALETTE.length).fill(0);
@@ -137,18 +198,16 @@ export class Game {
 
     const present = [];
     for (let i = 0; i < maxCi; i++) if (count[i] > 0) present.push(i);
-
     if (present.length === 0) return Math.floor(this.rng() * maxCi);
 
-    // 有颜色在盘面上缺席时（新解锁 / 刚被消光），先把它引回来，
-    // 否则新颜色永远等不到 22% 均匀抽样那一档，5 色关卡会一直是 4 色。
+    // 有颜色缺席时（新解锁 / 刚被消光）先把它引回来，
+    // 否则新颜色永远等不到均匀抽样那一档。
     if (present.length < maxCi && this.rng() < 0.38) {
       const missing = [];
       for (let i = 0; i < maxCi; i++) if (count[i] === 0) missing.push(i);
       if (missing.length) return missing[Math.floor(this.rng() * missing.length)];
     }
 
-    // 78% 按存量加权；22% 均匀（保持随机性）
     if (this.rng() < 0.78) {
       let total = 0;
       for (const i of present) total += count[i];
@@ -170,7 +229,6 @@ export class Game {
     const t = Math.min(1, this.time / CFG.rampSec);
     this.beat = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * t;
 
-    // 转轮：皮带自带基础带速，玩家只在它之上加减速
     const dir = this.input;
     if (dir !== 0) {
       this.v += dir * CFG.accel * dt;
@@ -180,23 +238,20 @@ export class Game {
     this.v = Math.max(-CFG.vMax, Math.min(CFG.vMax, this.v));
     this.phase = mod(this.phase + this.v * dt, N);
 
-    // 视觉位移回弹
     const decay = Math.exp(-dt * 26);
     for (const b of this.slots) if (b) b.dx *= decay;
     if (this.chain > 0 && this.time - this.chainT > 1.1) this.chain = 0;
-    for (let i = this.fx.length - 1; i >= 0; i--) {
-      this.fx[i].life -= dt;
-      if (this.fx[i].life <= 0) this.fx.splice(i, 1);
+    if (this.combo > 0 && this.time - this.comboT > COMBO_WINDOW) {
+      if (this.combo >= 3) this.events.push({ type: 'combobreak', combo: this.combo });
+      this.combo = 0;
     }
 
-    // 节拍发球
     this.beatClock += dt;
     if (this.beatClock >= this.beat) {
       this.beatClock -= this.beat;
       this.fire();
     }
 
-    // 飞行
     if (this.balls.length) {
       for (const b of this.balls) b.t += dt;
       if (this.balls[0].t >= CFG.flightTime) this.land();
@@ -207,15 +262,26 @@ export class Game {
 
   fire() {
     const n = this.nozzleCount();
-    this.balls = NOZZLE_OFF.slice(0, n).map((off, i) => ({ ci: this.nozzleCi[i], off, t: 0 }));
-    // 每次发球都刷新两个喷头的待发色，保证副喷头激活时颜色已经就绪
-    this.nozzleCi = [this.pickColor(), this.pickColor()];
+    const idxs = this.nextVolley();
+    if (CFG.rotate && n >= 3) this.volleyIndex = (this.volleyIndex + 1) % n;
+
+    this.balls = idxs.map((i) => {
+      const ci = this.queues[i][0];
+      this.queues[i].shift();
+      this.queues[i].push(this.pickColor());
+      return { ci, off: this.nozzleOff[i], idx: i, t: 0 };
+    });
+
     this.shots++;
     this.drops += this.balls.length;
-    this.events.push({ type: 'fire', colors: this.balls.map((b) => b.ci), n });
+    this.events.push({
+      type: 'fire',
+      colors: this.balls.map((b) => b.ci),
+      offs: this.balls.map((b) => b.off),
+      n: this.balls.length,
+    });
   }
 
-  /** 落点对应的槽位。off 为喷头偏移（0 或 N/2） */
   impactSlot(off = 0) {
     return mod(Math.round(-this.phase) + off, N);
   }
@@ -223,12 +289,12 @@ export class Game {
   land() {
     const balls = this.balls;
     this.balls = [];
-    // 先把两个落点槽算死，再依次落球：
-    // 第一颗的推挤会挪动珠子，但落点槽本身只由 phase 决定，不跟着动。
+    // 先把落点槽算死，再依次落球：推挤会挪动珠子，但落点只由 phase 决定
     const targets = balls.map((b) => ({
       k: mod(Math.round(-this.phase) + b.off, N),
       ci: b.ci,
       off: b.off,
+      idx: b.idx,
     }));
     for (const t of targets) this.dropAt(t.k, t.ci, t.off);
   }
@@ -239,20 +305,16 @@ export class Game {
 
     const bead = this.makeBead(ci);
     const wasEmpty = this.slots[k] === null;
-    // 落点为空时，球不会钉在空皮带上，而是吸附到最近的珠子、插进链里。
-    // 这是祖玛的正统行为：球永远属于某条链，"接空"的代价是插到了你不想要的地方。
     const target = wasEmpty ? this.snap(k) : k;
     if (wasEmpty && target !== k) this.snapped++;
 
     if (this.slots[target] === null) {
-      // 整盘全空（极小概率）：直接落在落点
       this.slots[target] = bead;
       this.events.push({ type: 'lone', slot: target, ci, off, s: mod(target + this.phase, N) * D });
       this.resolve(target, off);
       return;
     }
 
-    // 插进珠链：向较近的空档方向整体推开
     const p = this.nearestNull(target, +1);
     const q = this.nearestNull(target, -1);
     if (p < 0 && q < 0) { this.kill('overflow'); return; }
@@ -281,7 +343,6 @@ export class Game {
     this.resolve(target, off);
   }
 
-  /** 落点为空时，找最近的非空槽作为插入点 */
   snap(k) {
     const p = this.nearestBead(k, +1);
     const q = this.nearestBead(k, -1);
@@ -304,7 +365,7 @@ export class Game {
     return -1;
   }
 
-  // ---- 消除 + 连锁（同帧算完，表现层自己排队播）----
+  // ---- 消除 + 连锁 + 连消 ----
   resolve(startSlot = -1, off = 0) {
     let chain = 0;
     for (let guard = 0; guard < 24; guard++) {
@@ -312,8 +373,19 @@ export class Game {
       if (!run) break;
 
       chain++;
-      const mult = CHAIN_MULT[Math.min(chain - 1, CHAIN_MULT.length - 1)];
-      const gain = BASE_SCORE(run.len) * mult;
+      // 连消按「消掉的颗数」累加：一次四消直接 +4，比按次数累加更容易起势，
+      // 也更符合玩家对"连消"的直觉（消得越多，加得越快）。
+      this.combo += run.len;
+      this.comboT = this.time;
+      this.maxCombo = Math.max(this.maxCombo, this.combo);
+      if (this.combo === 3 || this.combo === 6 || this.combo === 10 || this.combo === 15) {
+        this.events.push({ type: 'combo', combo: this.combo });
+      }
+
+      const chainMult = CHAIN_MULT[Math.min(chain - 1, CHAIN_MULT.length - 1)];
+      const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
+      const base = BASE_SCORE(run.len);
+      const gain = Math.round(base * chainMult * comboMult);
       this.score += gain;
       this.clears++;
 
@@ -327,9 +399,13 @@ export class Game {
         this.slots[idx] = null;
       }
 
-      this.events.push({ type: 'clear', chain, gain, colors, positions, len: run.len, off });
+      this.events.push({
+        type: 'clear', chain, gain, base, chainMult, comboMult,
+        colors, positions, len: run.len, off,
+        s0: mod(run.start + this.phase, N) * D,
+        combo: this.combo,
+      });
 
-      // 断口合拢：把洞后面那一段整体拉回 len 格
       this.compact(run.start, run.len);
     }
 
@@ -337,10 +413,15 @@ export class Game {
       this.chain = chain;
       this.chainT = this.time;
       this.maxChain = Math.max(this.maxChain, chain);
-      this.combo++;
+
+      // 清空跑道：给一次大额奖励，鼓励"敢把盘面打空"
+      if (this.occupied() === 0) {
+        this.score += SWEEP_BONUS;
+        this.sweeps++;
+        this.events.push({ type: 'sweep', gain: SWEEP_BONUS, combo: this.combo });
+      }
     } else {
       this.chain = 0;
-      this.combo = 0;
     }
   }
 
@@ -349,7 +430,6 @@ export class Game {
       const b = this.slots[i];
       if (!b) continue;
       const prev = this.slots[mod(i - 1, N)];
-      // 只在色段起点起扫
       if (prev && prev.ci === b.ci) continue;
 
       let len = 1;
@@ -365,7 +445,6 @@ export class Game {
 
   compact(start, len) {
     const end = mod(start + len, N);
-    // 洞后面紧邻的连续段
     let run = 0;
     while (run < N - len && this.slots[mod(end + run, N)] !== null) run++;
     if (run === 0) return;
@@ -386,22 +465,19 @@ export class Game {
     this.events.push({ type: 'dead', reason });
   }
 
-  // ---- 输入 ----
   setInput(dir) { this.input = dir; }
 
   brake() {
     if (Math.abs(this.v) <= CFG.brakeMagnet) {
-      this.phase = Math.round(this.phase) % N;   // 磁吸对齐槽心
+      this.phase = Math.round(this.phase) % N;
     }
     this.v = 0;
   }
 
-  // ---- 渲染辅助 ----
   beadWorldS(slot) {
     return mod(slot + this.phase, N) * D;
   }
 
-  // 飞行剩余时间归一（0=刚发射，1=即将命中）
   flightProgress() {
     return this.balls.length ? Math.min(1, this.balls[0].t / CFG.flightTime) : 0;
   }

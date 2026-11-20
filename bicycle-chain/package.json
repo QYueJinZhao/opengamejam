@@ -1,9 +1,9 @@
 {
   "name": "bicycle-chain-zuma",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Bicycle-Chain Reverse Zuma — 2D prototype (M1: dual nozzle)",
+  "description": "Bicycle-Chain Reverse Zuma — 2D prototype (M2: 4 modes, combo, BGM)",
   "scripts": {
     "dev": "node serve.mjs",
     "test": "node test.mjs"
