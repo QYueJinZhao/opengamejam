@@ -72,38 +72,38 @@ function batch(mode, policy) {
   };
 }
 
-// 技巧倍率：每次发球时刻，最优相位收益 / 平均相位收益
+// 技巧倍率：每次发球时刻，最优相位收益 / 平均相位收益。
+// 轮流制下每发只有一颗球，所以另一个指标改成"可打点占比"——
+// 这颗球在环上是否至少存在一个值得打的落点（收益 >= 60）。
+// 太低说明这一发纯属随机，玩家没得选；太高说明球发得太"贴心"。
 function skillGap(mode) {
   const g = new Game(777, mode.id);
   const at = (j) => g.slots[mod(j, N)];
-  let bestSum = 0, avgSum = 0, samples = 0, bothGood = 0;
+  let bestSum = 0, avgSum = 0, samples = 0, playable = 0;
   for (let f = 0; f < Math.ceil(CFG.levelTime / DT); f++) {
     g.setInput(0);
     g.step(DT);
     for (const e of g.drainEvents()) {
       if (e.type !== 'fire') continue;
-      let best = -1e9, sum = 0, both = 0;
+      let best = -1e9, sum = 0;
       for (let q = 0; q < N; q++) {
-        let sc = 0, good = 0;
+        let sc = 0;
         for (let k = 0; k < e.colors.length; k++) {
-          const v = evalSlot(at, mod(-q + e.offs[k], N), e.colors[k]);
-          sc += v;
-          if (v >= 60) good++;
+          sc += evalSlot(at, mod(-q + e.offs[k], N), e.colors[k]);
         }
-        if (good >= 2) both++;
         sum += sc;
         if (sc > best) best = sc;
       }
       bestSum += best;
       avgSum += sum / N;
-      bothGood += both / N;
+      if (best >= 60) playable++;
       samples++;
     }
     if (g.dead) break;
   }
   return {
     ratio: bestSum / Math.max(1, avgSum),
-    both: bothGood / Math.max(1, samples),
+    playable: playable / Math.max(1, samples),
   };
 }
 
@@ -120,7 +120,7 @@ for (const mode of MODES) {
   console.log(`  段位  ${TIERS.map((t, i) => `${t.name}:${aim.bands[i]}`).join('  ')}`);
   console.log(`  乱按  score=${rand.score}  存活=${rand.survive}/${CYCLES}  爆仓=${rand.over}  段位 ${TIERS.map((t, i) => `${t.name}:${rand.bands[i]}`).join(' ')}`);
   console.log(`  挂机  score=${idle.score}  存活=${idle.survive}/${CYCLES}  爆仓=${idle.over}`);
-  console.log(`  技巧倍率=${gap.ratio.toFixed(2)}×  双落点同消占比=${(gap.both * 100).toFixed(0)}%`);
+  console.log(`  技巧倍率=${gap.ratio.toFixed(2)}×  可打点占比=${(gap.playable * 100).toFixed(0)}%`);
   console.log(`  段位线 C/B/A/S/SS = ${mode.tiers.join(' / ')}`);
   console.log('');
 }

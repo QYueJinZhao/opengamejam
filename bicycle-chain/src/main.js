@@ -124,7 +124,9 @@ function beam(s0, span, dur, color, w = 8) {
 function handleEvents() {
   for (const e of game.drainEvents()) {
     if (e.type === 'fire') {
-      if (!silent) sfx.fire(e.n > 1 ? 1 : 0);
+      // 按口编号给音高：轮流发射时，两个口交替出球，音高跟着交替，
+      // 玩家不看屏幕也能听出"这一发是左边那门还是右边那门"。
+      if (!silent) sfx.fire(e.idx || 0);
     } else if (e.type === 'insert') {
       if (!silent) (e.snapped ? sfx.snap() : sfx.click());
       const p = arcToScreen(e.s);
@@ -202,17 +204,17 @@ function handleEvents() {
       }
 
       if (e.tier >= 2) {
-        shock(600, 400, 40, 210 + e.tier * 30, 0.85, `rgba(${rgb},ALPHA)`, 2 + e.tier * 0.5);
+        shock(600, 440, 40, 210 + e.tier * 30, 0.85, `rgba(${rgb},ALPHA)`, 2 + e.tier * 0.5);
       }
       if (e.tier >= 3) {
         // 内圈白热：只有一到三圈，作用是给外圈一个"起点"，不然光环像飘着
-        shock(600, 400, 12, 130 + e.tier * 26, 0.55, 'rgba(255,255,255,ALPHA)', 2.4);
+        shock(600, 440, 12, 130 + e.tier * 26, 0.55, 'rgba(255,255,255,ALPHA)', 2.4);
         fx.flash = Math.min(0.5, fx.flash + 0.06 * (e.tier - 2));
       }
       if (e.tier >= 4) {
         for (let i = 0; i < 10; i++) {
           const a = (i / 10) * Math.PI * 2 + e.combo * 0.3;
-          burst(600 + Math.cos(a) * 150, 400 + Math.sin(a) * 110, -1, 3, 1.2, rgb);
+          burst(600 + Math.cos(a) * 150, 440 + Math.sin(a) * 110, -1, 3, 1.2, rgb);
         }
       }
       if (e.tier >= 5) {
@@ -227,8 +229,9 @@ function handleEvents() {
       const wild = e.ci === WILD;
       const c = ballSkin(e.ci);
       const rgb = wild ? '199,125,255' : '255,150,60';
-      // 炮口在轨道点外侧约 37px（nozzleGap 3.7 × S）。浮字必须落在炮口**之上**
-      // 的空白处：往下 34px 正好压在珠链上，"爆破球"三个字会被三颗珠子切开。
+      // p 是**轨道上**的落点，不是炮口。往上 37px 正好越过链条外沿
+      // （链条半宽约 27px），又远没到炮口——炮口在 125px 外，那里是炮管，
+      // 字压上去会读成"炮管上的标签"。所以浮字贴在环带外侧的空白处。
       const cx = p.x, cy = p.y - 37;
       shock(cx, cy, 8, wild ? 104 : 74, 0.62, `rgba(${rgb},ALPHA)`, 3.6);
       shock(cx, cy, 3, wild ? 48 : 36, 0.36, 'rgba(255,255,255,ALPHA)', 2.2);
@@ -243,7 +246,7 @@ function handleEvents() {
     } else if (e.type === 'sweep') {
       fx.flash = Math.min(0.55, fx.flash + 0.30);
       fx.shake = Math.min(34, fx.shake + 16);
-      shock(600, 400, 30, 380, 0.7, 'rgba(255,214,90,ALPHA)', 6);
+      shock(600, 440, 30, 380, 0.7, 'rgba(255,214,90,ALPHA)', 6);
       float(`清空跑道 +${e.gain}`, 600, 360, 30, '#FFD65A');
       if (!silent) sfx.sweep();
     } else if (e.type === 'dead') {
@@ -513,6 +516,19 @@ if (ffParam > 0) {
     paused = true;
   }
   lastNozzles = game.nozzleCount();
+  // ?pause=1 冻结在快进结束的那一帧。截图校验构图时用：飞行只有 1.3 秒，
+  // 靠 virtual-time 撞帧撞不到，而"球到底从哪儿起飞、飞到哪"必须看静态帧才说得清。
+  if (params.get('pause') === '1') paused = true;
+
+  // ?hold=0.5 强制出一颗球并把它钉在飞行进度的 50%。飞行只有 1.3 秒，
+  // 靠快进秒数去撞"球在空中"这一帧，撞十次有七次落空；构图校验要的是确定帧。
+  const holdParam = Number(params.get('hold') ?? -1);
+  if (holdParam >= 0) {
+    game.fire();
+    const b = game.balls[0];
+    if (b) b.t = b.dur * Math.max(0, Math.min(1, holdParam));
+    paused = true;
+  }
   // 走正常结算：否则快进到死不会写 best，调试截图和真实游玩的战绩会不一致
   if (game.dead) finishRun();
 }

@@ -195,5 +195,42 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   console.log(`  · 挂机一局：注入锈球 ${rust} 颗，爆破 ${bomb} 次，得分 ${g.score}`);
 }
 
+// 10) 轮流发射：一次只出一颗，口按顺序轮转
+//
+// 这一条守的是本轮最核心的机制改动。上一版每拍齐射：两个口同帧出球、
+// 同帧落地，玩家只有一个相位可调，屏幕上却有两颗球要读。改成轮流之后，
+// 每一发都是独立事件——但必须真的"轮"，否则双炮会有一门永远闲置。
+{
+  const g = new Game(31, 'standard');
+  g.time = 30;                      // 标准模式 20s 后第二个口才上线，之前只有一个口
+  const idxs = [];
+  for (let i = 0; i < 6; i++) { g.fire(); idxs.push(g.balls[0].idx); }
+  ok(idxs.join('') === '010101', `双口交替开火（得到 ${idxs.join('')}）`);
+  ok(g.balls.length === 1, `一次只出一颗球（${g.balls.length}）`);
+
+  const h = new Game(33, 'triple');
+  h.time = 40;                      // 三射口模式 30s 后第三个口才上线
+  const t = [];
+  for (let i = 0; i < 6; i++) { h.fire(); t.push(h.balls[0].idx); }
+  ok(t.join('') === '012012', `三口按 0→1→2 轮转（得到 ${t.join('')}）`);
+}
+
+// 11) 飞行期间不发射下一颗：空中最多一颗球
+//
+// fire() 是整组替换 balls 的，如果 beat 短于飞行时长，上一颗会凭空消失
+// （连落地都没发生过）。step 里的 beat 下限（flight + fireGap）就是为这条守的。
+{
+  const g = new Game(32, 'standard');
+  let maxBalls = 0, fires = 0;
+  for (let f = 0; f < 120 * 60; f++) {
+    g.step(1 / 120);
+    maxBalls = Math.max(maxBalls, g.balls.length);
+    for (const e of g.drainEvents()) if (e.type === 'fire') fires++;
+    if (g.dead) break;
+  }
+  ok(maxBalls <= 1, `空中同时最多一颗球（${maxBalls}）`);
+  ok(fires >= 12, `60 秒内出球 ${fires} 次（间隔约 ${(60 / Math.max(1, fires)).toFixed(2)}s）`);
+}
+
 console.log(bad ? `\n失败 ${bad} 项` : '\n全部通过');
 process.exit(bad ? 1 : 0);

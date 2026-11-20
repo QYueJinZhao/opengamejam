@@ -4,7 +4,9 @@
 // 结构与上一版的关键差异：
 // 1. 每个射口有一个 3 球预览队列（当前 + 下两颗），玩家能提前规划；
 // 2. 射口数量 / 落点间距 / 轮径 / 槽数全部由 modes.js 决定；
-// 3. 三射口模式「轮转两发」：每拍只有一个口休息，下拍换一个，压力仍是 2 球/拍；
+// 3. 多射口**轮流开火**：一次只出一颗，口与口按 volleyIndex 轮转。
+//    上一版是"每拍齐射"，两颗球同时出膛——玩家一次要做两个落点决策，
+//    而两个落点相距 11 格，眼睛根本分不开。轮流之后，每一发都是独立事件。
 // 4. 新增跨节拍连击 RUSH：连续每拍都有消除才涨，断一拍就归零，是主要得分杠杆。
 
 import { C, N, D, L, mod, configure } from './geom.js';
@@ -77,17 +79,28 @@ export const BASE_CFG = {
   // 参数从"飞行时长"改成"飞行速度"：炮口到轨道的距离是几何（nozzleGap），
   // 时长由 dist/speed 推出来。现在两者等价（间距恒定），但语义正过来了——
   // 以后改炮管长度、或者改成斜射，速度不用重调，时长自己跟着变。
-  nozzleGap: 3.7,      // 炮口到轨道中心线的世界距离（render 的法向偏移用同一个值）
-  flightSpeed: 4.6,    // 世界单位 / 秒。3.7 / 4.6 ≈ 0.80s，和上一版观感一致
-  beatStart: 3.40,
-  beatEnd: 2.05,
+  //
+  // 第三轮：3.7 → 4.6，同时把速度从 4.6 压到 3.5。
+  // 用户的原话是"炮口和轮盘距离要远一点，需要些时间玩家可以反应"——
+  // 反应时间 = 距离 / 速度，所以两件事要一起做才有意义：只拉远距离、
+  // 不加时间，玩家看到的只是"球飞得更急"；只减速、不拉远，炮口会贴在轮盘边上
+  // 显得局促。现在 4.6 / 3.5 = 1.31s，比上一版的 0.80s 长 64%。
+  //
+  // 4.6 而不是更远，是画布预算决定的：炮口往上一格，整个轮盘就要缩一格
+  // （见 render 的 syncGeo）。再远下去珠子会小到看不清星芒和八面体的区别，
+  // 那就把第一轮做的形状编码废掉了。
+  nozzleGap: 4.6,      // 炮口到轨道中心线的世界距离（render 的法向偏移用同一个值）
+  flightSpeed: 3.5,    // 世界单位 / 秒 → 飞行 1.31s
+  // 上一颗落地到下一颗出膛的最小间隔。没有它，beat 一旦短于飞行时长，
+  // 新球会把还在空中的那颗直接覆盖掉（balls 被整组替换）。
+  fireGap: 0.08,
+  beatStart: 2.20,
+  beatEnd: 1.45,
   rampSec: 90,
   levelTime: 90,
   startBeads: 8,
   colorSteps: [[0, 4], [45, 5]],
   stages: [[0, 1], [20, 2]],
-  volley: 2,
-  rotate: false,
 
   // ---- 特殊球 ----
   // 现在是**双轨**：
@@ -243,13 +256,12 @@ export class Game {
     this.comboT = -99;
     this.comboTier = 0;      // 已经播报过的最高档位，防止同一档重复演出
     this.maxCombo = 0;
-    this.volleyIndex = 0;    // 三射口：下一个休息的口
+    this.volleyIndex = 0;    // 下一个开火的射口（轮流制）
     this.rustClock = 0;
     this.rustPlaced = 0;
     this.bombs = 0;
     this.wilds = 0;
     this.rewards = 0;        // 4/5 连挣来的奖励球累计
-    this.rewardIdx = 0;
     this.shots = 0;
     this.drops = 0;
     this.clears = 0;
@@ -321,16 +333,17 @@ export class Game {
     return Math.min(n, this.mode.layout);
   }
 
-  /** 下一拍实际开火的射口（三射口模式会轮休一个） */
+  /**
+   * 下一发从哪个口出。
+   *
+   * 从"返回一组口"改成"返回一个口"，是这一版最大的机制改动。
+   * 齐射时两颗球共享同一个落点时刻，玩家其实只有一个自由度（一个相位），
+   * 但屏幕上同时有两颗球要读——信息量翻倍，决策量不变，纯粹是认知噪声。
+   * 改成轮转之后，每一颗球都是一次完整的"看球色 → 转盘 → 等落地"。
+   */
   nextVolley() {
     const n = this.nozzleCount();
-    if (!CFG.rotate || n < 3) {
-      return Array.from({ length: n }, (_, i) => i);
-    }
-    const v = Math.min(CFG.volley ?? 2, n);
-    const out = [];
-    for (let k = 0; k < v; k++) out.push((this.volleyIndex + k) % n);
-    return out;
+    return [this.volleyIndex % n];
   }
 
   // ---- 发色权重：按场上存量加权，冷门色强制召回 ----
@@ -420,7 +433,14 @@ export class Game {
 
     this.time += dt;
     const t = Math.min(1, this.time / CFG.rampSec);
-    this.beat = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * t;
+    // beat 现在的语义是"两颗球之间的间隔"，不是"一拍的时长"。
+    // 齐射取消后，球是一颗一颗出的，所以这个数直接就是发球节奏。
+    //
+    // 下限由飞行时长决定：一次只允许一颗球在空中。否则 balls 会被
+    // fire 整组替换，还在飞的那颗凭空消失（它连落地都没发生过）。
+    const flight = CFG.nozzleGap / CFG.flightSpeed;
+    const rawBeat = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * t;
+    this.beat = Math.max(rawBeat, flight + CFG.fireGap);
 
     const dir = this.input;
     if (dir !== 0) {
@@ -446,8 +466,16 @@ export class Game {
       this.comboTier = 0;
     }
 
+    // 落地排在发射之前：同一帧里"上一颗贴上链条 → 下一颗出膛"是连续动作，
+    // 反过来的话每次都会多等一帧，1.3s 的间隔里那一帧停顿是听得出来的。
+    if (this.balls.length) {
+      for (const b of this.balls) b.t += dt;
+      if (this.balls[0].t >= this.balls[0].dur) this.land();
+      if (this.dead) return;
+    }
+
     this.beatClock += dt;
-    if (this.beatClock >= this.beat) {
+    if (this.beatClock >= this.beat && !this.balls.length) {
       this.beatClock -= this.beat;
       this.fire();
     }
@@ -462,38 +490,41 @@ export class Game {
       }
     }
 
-    if (this.balls.length) {
-      for (const b of this.balls) b.t += dt;
-      if (this.balls[0].t >= this.balls[0].dur) this.land();
-    }
-
     if (this.time >= CFG.levelTime) this.kill('time');
   }
 
+  /**
+   * 出一颗球。口按 volleyIndex 轮转，一次只有一个口动作。
+   *
+   * "轮流"不只是视觉偏好。齐射时两个口同帧出球、同帧落地，玩家只有
+   * 一个落点相位可调——两颗球其实是绑死的一个事件。轮流之后每颗球
+   * 单独占一个飞行窗口，玩家的每一次转盘都对应一颗具体的球，
+   * 因果链是干净的；代价是总发球速率要减半（见 modes 的 beat 参数）。
+   */
   fire() {
     const n = this.nozzleCount();
-    const idxs = this.nextVolley();
-    if (CFG.rotate && n >= 3) this.volleyIndex = (this.volleyIndex + 1) % n;
+    const idx = this.volleyIndex % n;
+    this.volleyIndex = (idx + 1) % n;
+
+    const ci = this.queues[idx][0];
+    this.queues[idx].shift();
+    this.queues[idx].push(this.pickShot());
 
     // 时长由**速度**推出来，不是写死的秒数。飞行距离现在是恒定的（炮口正下方），
     // 但这条式子不假设它恒定：以后炮管拉长、或者改成斜射，只要 dist 变了，
     // 时长自己跟着变，速度不用重调。
     const dur = CFG.nozzleGap / CFG.flightSpeed;
 
-    this.balls = idxs.map((i) => {
-      const ci = this.queues[i][0];
-      this.queues[i].shift();
-      this.queues[i].push(this.pickShot());
-      return { ci, off: this.nozzleOff[i], idx: i, t: 0, dur };
-    });
+    this.balls = [{ ci, off: this.nozzleOff[idx], idx, t: 0, dur }];
 
     this.shots++;
-    this.drops += this.balls.length;
+    this.drops++;
     this.events.push({
       type: 'fire',
-      colors: this.balls.map((b) => b.ci),
-      offs: this.balls.map((b) => b.off),
-      n: this.balls.length,
+      colors: [ci],
+      offs: [this.nozzleOff[idx]],
+      idx,
+      n: 1,
     });
   }
 
@@ -779,7 +810,7 @@ export class Game {
         if (crossedTier >= 3) reward = WILD;
         else if (crossedTier >= 2) reward = BOMB;
       }
-      if (reward) this.grantReward(reward, off);
+      if (reward) this.grantReward(reward);
 
       // 清空跑道：给一次大额奖励，鼓励"敢把盘面打空"
       if (this.occupied() === 0) {
@@ -798,14 +829,17 @@ export class Game {
    * 为什么插最前面而不是附加：奖励必须"下一发就能用"，否则玩家感受不到因果
    * ——4 连和两拍后的某颗球之间建立不了联系。
    *
+   * 插哪个口：`volleyIndex` 指向的那个——它正好是**下一发**要开火的口。
+   * 上一版按"消除发生的那个落点"去找口，齐射时两者等价（两个口同帧开火），
+   * 轮流之后就不等价了：你在 A 口消除，下一发可能从 B 口出，奖励会跑到
+   * 两发之后才兑现，因果链断掉。
+   *
    * 为什么必须挤掉一颗：队列定长 3 是有意义的（待发 + 两个预览，等于"我接下来
    * 能规划两步"）。变长会悄悄改掉节奏。挤掉末尾那颗是**代价**，也是这个奖励
    * 唯一的分量：你用一个已知信息换了一个强力球。
    */
-  grantReward(ci, off = 0) {
-    const i = this.nozzleOff.indexOf(off);
-    const idx = i >= 0 ? i : (this.rewardIdx % this.queues.length);
-    this.rewardIdx = (idx + 1) % this.queues.length;
+  grantReward(ci) {
+    const idx = this.volleyIndex % this.queues.length;
 
     const q = this.queues[idx];
     const dropped = q.length >= 3 ? q.pop() : null;

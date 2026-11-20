@@ -16,7 +16,13 @@ function hexRgb(hex) {
   const n = parseInt(hex.slice(1), 16);
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
 }
-const CX = 600, CY = 400;
+// 画布中心。**不是 400**。
+//
+// 炮口在轮盘上方，而炮口这一版被拉远到 4.2 个世界单位——如果轮盘还在
+// 垂直正中，炮身和顶部挂板会顶穿标题行（实测挂板顶到 y=21，标题在 y=36）。
+// 把轮盘下移 40px 之后，上面让出的正是炮台需要的空间，下面仍然够放
+// combo 条和操作提示。画面重心略微下沉，但上方被炮台填住，反而成了层次。
+const CX = 600, CY = 440;
 const PI2 = Math.PI * 2;
 
 const FONT = '"Inter","PingFang SC","Microsoft YaHei",system-ui,sans-serif';
@@ -27,7 +33,7 @@ const ink = (a) => `rgba(228,236,250,${a})`;
 let S = 30;
 let BEAD_R = 15;
 let CHANNEL_W = 33;
-let NOZ_STAND = 3.2;      // 炮口离跑道中心线的距离（世界单位）
+let NOZ_STAND = 4.5;      // 炮口离跑道中心线的距离（世界单位），由 CFG.nozzleGap 同步
 let IMPACTS = [];
 let NOZZLES = [];
 let geoKey = '';
@@ -39,10 +45,20 @@ function syncGeo(game) {
 
   // 三个约束取最小，别只用一个魔法数：
   //   34    —— 再大珠子就顶到左右 HUD 的边距了
-  //   300/(R+3.2) —— 纵向预算：炮口中心 + 炮身长度不能吃掉顶部标题行
-  //   790/(2(C+R)) —— 横向预算：导轨外沿不能压到左右 HUD 栏
+  //   261/(R+stand) —— 纵向预算：炮口 + 炮身 + 顶部挂板（合计约 109px）
+  //                    必须在标题行以下
+  //   790/(2(C+R))  —— 横向预算：导轨外沿不能压到左右 HUD 栏
   // 上一版只有一个 250/(R+4.2)，对标准轮是 30.5，把纵向空间白扔了 15%。
-  S = Math.min(34, 300 / (R + 3.2), 790 / (2 * (C + R)));
+  //
+  // stand 直接取 CFG.nozzleGap：飞行距离和屏幕上的炮口位置必须是同一个数，
+  // 否则"炮口看着在 120px 外、球却飞了 150px"——球的初速会凭空跳一下。
+  //
+  // 261 的来历：轮盘中心下移到 CY=440 之后，纵向可用 = 440 − 挂板顶端到炮口的
+  // 109px − 标题下的留白 70px。上一版用 300 只算了炮口、漏了挂板，
+  // 所以 34 的满格其实一直压着标题行；这一版把 stand 从 3.2 抬到 4.2，
+  // 预算必须把挂板算进去，否则挂板会被画布裁掉。
+  NOZ_STAND = CFG.nozzleGap;
+  S = Math.min(34, 261 / (R + NOZ_STAND), 790 / (2 * (C + R)));
   BEAD_R = (D * S) / 2 * 0.94;
   CHANNEL_W = D * S * 1.06;
 
@@ -54,9 +70,17 @@ function syncGeo(game) {
     const nrm = normalAt(s);
     const tan = tangentAt(s);
     IMPACTS.push(p);
+    // 两个点要分开：
+    //   muzzle —— 炮口，也就是球真正的起飞点（轨道外 NOZ_STAND 世界单位）
+    //   pivot  —— 炮身局部坐标系的原点。cannon() 里炮口画在局部 +23px，
+    //             所以 pivot 必须比 muzzle 再往外 23px，炮口的椭圆才正好
+    //             落在球起飞的位置上。上一版两者混用，球是从炮管中段冒出来的。
+    const mx = p.x + nrm.x * NOZ_STAND;
+    const my = p.y + nrm.y * NOZ_STAND;
     NOZZLES.push({
-      x: p.x + nrm.x * NOZ_STAND,
-      y: p.y + nrm.y * NOZ_STAND,
+      mx, my,
+      x: mx + nrm.x * (23 / S),
+      y: my + nrm.y * (23 / S),
       nx: nrm.x, ny: nrm.y,
       tx: tan.x, ty: tan.y,
       s,
@@ -669,12 +693,12 @@ export class Renderer {
   // 预测命中槽：按"现在松手"，球落地时炮口下会是哪个槽位。
   predSlots(game) {
     // 只在"即将发射 / 已经发射"时才预告：没有球在飞的时候，
-    // 松手预测要跨过整整一拍（2-3 秒、4 格以上），那已经不是玩家在做的决定了。
+    // 松手预测要跨过整整一拍（1.3-2.2 秒、3 格以上），那已经不是玩家在做的决定了。
     const imminent = game.beat - game.beatClock < 0.55;
     if (!game.balls.length && !imminent) return [];
     const coast = this.coastSlots(game);
-    // 只预告真的会开火的那几个口：三射口模式下有一个口在轮休，
-    // 给休息的口也画环，等于告诉玩家"它会打这里"，是错的。
+    // 只预告真的会开火的那个口：轮流制下另一个口这一发不打，
+    // 给它也画环，等于告诉玩家"它会打这里"，是错的。
     const offs = game.balls.length
       ? game.balls.map((b) => b.off)
       : game.nextVolley().map((i) => game.nozzleOff[i]);
@@ -1158,7 +1182,13 @@ export class Renderer {
   // ---------- 落点 ----------
   reticle(game, ui) {
     const n = game.nozzleCount();
-    const active = game.nextVolley();
+    // 准星跟的是**正在飞的那颗球**，不是"下一发从哪出"。
+    // 这两个在轮流制下不是同一个口：开火瞬间 volleyIndex 就前进了一格，
+    // 如果准星跟着它走，飞行途中准星会跳到另一门炮下面，玩家会以为
+    // 球要落在那里——而球其实正飞向这一门。
+    const active = game.balls.length
+      ? game.balls.map((b) => b.idx)
+      : game.nextVolley();
     for (let i = 0; i < n; i++) {
       if (!active.includes(i)) continue;
       this.reticleAt(game, i, ui);
@@ -1255,10 +1285,14 @@ export class Renderer {
     const to = IMPACTS[ball.idx] || IMPACTS[0];
     if (!from || !to) return;
 
+    // 从炮口（muzzle）起飞，不是从炮身中心。距离正好等于 CFG.nozzleGap，
+    // 所以屏幕上量到的速度和 dur 是同一个数。
+    const start = { x: from.mx, y: from.my };
+
     // 同一套路径函数：球体和尾迹必须走同一条曲线，否则尾迹会脱轨
     const pos = (u) => this.toScreen({
-      x: from.x + (to.x - from.x) * u,
-      y: from.y + (to.y - from.y) * u,
+      x: start.x + (to.x - start.x) * u,
+      y: start.y + (to.y - start.y) * u,
     });
 
     for (let i = 5; i >= 1; i--) {
@@ -1290,9 +1324,17 @@ export class Renderer {
    * 导轨比主体长，是为了让"这一炮是打向跑道的"这件事在剪影上就成立——
    * 上一版是一根喇叭口，看起来像喷嘴而不是发射器。
    */
-  cannon(charge, head) {
+  cannon(charge, head, dimmed = false) {
     const ctx = this.ctx;
     const half = 16;
+    // 待命状态不能只靠 globalAlpha 压暗：炮身填充本身接近背景色（#0A0F16），
+    // 压暗之后连轮廓都消失，只剩一个挂板浮在空中。所以待命时反过来——
+    // 给外壳一圈淡蓝外发光，让剪影从暗底上"浮"出来，同时不发光、不充能。
+    if (dimmed) {
+      ctx.save();
+      ctx.shadowColor = 'rgba(84,150,225,0.55)';
+      ctx.shadowBlur = 13;
+    }
 
     for (const sx of [-1, 1]) {
       const x0 = sx * 17.5;
@@ -1303,7 +1345,7 @@ export class Renderer {
       ctx.roundRect(x0 - 4.5, -47, 9, 90, 4.5);
       ctx.fillStyle = g;
       ctx.fill();
-      ctx.strokeStyle = 'rgba(130,200,255,0.16)';
+      ctx.strokeStyle = dimmed ? 'rgba(120,180,240,0.34)' : 'rgba(130,200,255,0.16)';
       ctx.lineWidth = 1;
       ctx.stroke();
 
@@ -1321,15 +1363,19 @@ export class Renderer {
     }
 
     // 主体
+    //
+    // 配色比上一版整体提亮一档（#3E4F67→#4C607C / #0A0F16→#0D131B）。
+    // 原因是本轮开始"两门炮只有一门在发光"：炮身如果本身是接近背景的黑，
+    // 待命的那门就彻底消失了。现在的规则是炮身自己可见、状态靠光表达。
     ctx.beginPath();
     ctx.roundRect(-half, -40, half * 2, 62, 11);
     const bg = ctx.createLinearGradient(-half, -40, half, 22);
-    bg.addColorStop(0, '#3E4F67');
-    bg.addColorStop(0.45, '#1B2532');
-    bg.addColorStop(1, '#0A0F16');
+    bg.addColorStop(0, '#4C607C');
+    bg.addColorStop(0.45, '#222D3C');
+    bg.addColorStop(1, '#0D131B');
     ctx.fillStyle = bg;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(140,200,255,0.22)';
+    ctx.strokeStyle = dimmed ? 'rgba(150,205,255,0.50)' : 'rgba(140,200,255,0.30)';
     ctx.lineWidth = 1.2;
     ctx.stroke();
 
@@ -1358,10 +1404,12 @@ export class Renderer {
     ctx.beginPath();
     ctx.arc(0, -7, 15.5, 0, PI2);
     ctx.strokeStyle = head.base;
-    ctx.globalAlpha = 0.55;
+    // 待命炮的色环压到 0.30 + 半量泛光：待发球本身会以 0.82 的 alpha 盖在上面，
+    // 那圈「球色光环」如果和 active 的冷光一样亮，玩家会把它当成"要开火了"。
+    ctx.globalAlpha = dimmed ? 0.30 : 0.55;
     ctx.lineWidth = 2.4;
     ctx.shadowColor = head.base;
-    ctx.shadowBlur = 12;
+    ctx.shadowBlur = dimmed ? 6 : 12;
     ctx.stroke();
     ctx.globalAlpha = 1;
     ctx.shadowBlur = 0;
@@ -1383,6 +1431,8 @@ export class Renderer {
         ctx.fill();
       }
     }
+
+    if (dimmed) ctx.restore();
   }
 
   // ---------- 炮口 ----------
@@ -1430,8 +1480,19 @@ export class Renderer {
     if (!nz) return;
     const p = this.toScreen(nz);
     const head = ballSkin(game.queues[idx][0]);
-    const charge = Math.min(1, game.beatClock / game.beat);
-    const dim = active ? 1 : 0.42;
+    // 只有轮到的那门炮在充能。上一版两个口共用同一个 charge 值，
+    // 齐射时没问题；轮流制下会让玩家以为两门炮都要开火。
+    const charge = active ? Math.min(1, game.beatClock / game.beat) : 0;
+    // **不靠压暗表达待命**。
+    //
+    // 试过 0.30 / 0.45 / 0.70 / 0.78，全都失败：炮身填充是 #0A0F16 这个
+    // 接近背景的深色，任何程度的 alpha 压缩都先吃掉轮廓，最后剩一个
+    // 挂板浮在空中，或者一颗青色小三角悬在虚空里。
+    //
+    // 真正区分两门炮的是"光"：active 有炮口光晕 + 充能条 + 亮炮口环，
+    // 待命只有虚线环。所以 alpha 几乎不动（0.92 只用来区分一点点重量），
+    // 剪影永远是完整的——这也是暗场里唯一说得通的规则。
+    const dim = active ? 1 : 0.92;
 
     ctx.save();
     ctx.globalAlpha = dim;
@@ -1454,11 +1515,36 @@ export class Renderer {
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(Math.atan2(nz.nx, -nz.ny));
-    this.cannon(charge, head);
+    this.cannon(charge, head, !active);
     ctx.restore();
 
-    // 待发球：坐在炮身凹槽里。它必须是唯一"实体"的球，
-    // 因为玩家要靠它决定这一发往哪打。
+    ctx.restore();
+
+    // 轮到谁：炮口一团呼吸光。
+    //
+    // 不用"把没轮到的炮变暗"来表达轮转，因为两门炮的炮身本来就接近背景色，
+    // 再压暗就没有炮了。改成给**要开火的那门**加光——暗场里唯一能读作
+    // "正在工作"的就是光本身。光晕随充能变亮，出膛瞬间正好最亮。
+    const muzzle = this.toScreen({ x: nz.mx, y: nz.my });
+    if (active) {
+      const pulse = 0.5 + 0.5 * Math.sin(this.t * (3.4 + 5.2 * charge));
+      const R0 = 18 + 14 * charge + 2 * pulse;
+      const gg = ctx.createRadialGradient(muzzle.x, muzzle.y, 2, muzzle.x, muzzle.y, R0);
+      gg.addColorStop(0, `rgba(160,240,255,${(0.20 + 0.30 * charge).toFixed(3)})`);
+      gg.addColorStop(0.55, `rgba(96,200,255,${(0.08 + 0.12 * charge).toFixed(3)})`);
+      gg.addColorStop(1, 'rgba(80,180,255,0)');
+      ctx.fillStyle = gg;
+      ctx.beginPath();
+      ctx.arc(muzzle.x, muzzle.y, R0, 0, PI2);
+      ctx.fill();
+    }
+    // 待命不加任何额外标记。试过虚线环，但它和炮口自身的椭圆环叠在一起，
+    // 读起来像"炮口有污渍"；而"没有光"本身就是待命最干净的信号。
+
+    // 待发球：坐在炮身凹槽里。它的 alpha **不跟 dim 走**——另一门炮虽然没轮到，
+    // 但"它下一颗是什么颜色"是玩家规划两步的依据，看不清等于白给。
+    ctx.save();
+    ctx.globalAlpha = active ? 1 : 0.82;
     this.ballBody(p.x - nz.nx * 7, p.y - nz.ny * 7, 13, game.queues[idx][0], ui.cb);
     ctx.restore();
 
@@ -1472,7 +1558,9 @@ export class Renderer {
       const px = p.x + nz.tx * d * side + nz.nx * 8;
       const py = p.y + nz.ty * d * side + nz.ny * 8;
       ctx.save();
-      ctx.globalAlpha = (k === 1 ? 0.85 : 0.5) * dim;
+      // 预览队列的暗化比炮身轻：它是"接下来两颗"的读数，
+      // 按 dim（0.45）压下去会彻底读不出来。
+      ctx.globalAlpha = (k === 1 ? 0.85 : 0.5) * (active ? 1 : 0.72);
       ctx.beginPath();
       ctx.moveTo(p.x + nz.tx * 26 * side + nz.nx * 8, p.y + nz.ty * 26 * side + nz.ny * 8);
       ctx.lineTo(px, py);
@@ -1483,15 +1571,9 @@ export class Renderer {
       ctx.restore();
     }
 
-    // 轮休标记
-    if (!active) {
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.font = `600 9px ${MONO}`;
-      ctx.fillStyle = 'rgba(255,200,120,0.75)';
-      ctx.fillText('REST', p.x, p.y + 40);
-      ctx.restore();
-    }
+    // 轮转提示：没轮到的炮口不写字，只靠变暗 + 不充能表达"再等一发"。
+    // 上一版这里写 REST（三射口轮休），现在两个口是交替开火，
+    // "休息"是错的语义——它们都会开火，只是还没轮到。
   }
 
   // ---------- 特效 ----------
