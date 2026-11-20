@@ -6,10 +6,16 @@
 // 色相退成第二编码，所以高对比模式（V 键）只需要加强图底分离，不需要额外形符。
 
 import { C, R, L, N, D, pointAt, tangentAt, normalAt, mod } from './geom.js';
-import { PALETTE, CFG, comboMult, ballSkin, RUST, WILD, BOMB } from './sim.js';
+import { PALETTE, CFG, comboMult, comboTierIndex, COMBO_TIERS, ballSkin, RUST, WILD, BOMB } from './sim.js';
 import { MODES, TIERS, scoreBand, tierProgress } from './modes.js';
 
 const VW = 1200, VH = 800;
+
+/** '#RRGGBB' → 'r,g,b'。连消档位只在一处定义颜色，这里负责换格式。 */
+function hexRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
 const CX = 600, CY = 400;
 const PI2 = Math.PI * 2;
 
@@ -129,6 +135,7 @@ export class Renderer {
     this.shocks(fx);
     this.particles(fx);
     this.vignette();
+    this.comboGlow(fx);
     this.floats(fx);
     if (fx && fx.flash > 0.001) {
       this.ctx.fillStyle = `rgba(210,235,255,${Math.min(0.5, fx.flash)})`;
@@ -1584,6 +1591,29 @@ export class Renderer {
     }
   }
 
+  /**
+   * 连消高段的屏幕边缘辉光。
+   *
+   * 为什么用"边缘"而不是"全屏亮"：全屏亮（flash）会压暗盘面上的颜色，
+   * 高连消的瞬间恰恰是最需要看清珠子的时候。边缘辉光把亮度放在玩家不看的地方，
+   * 却能被余光完整接收到——它是"氛围在告诉你出事了"，不是"画面被盖住了"。
+   */
+  comboGlow(fx) {
+    if (!fx || !fx.glow) return;
+    const ctx = this.ctx;
+    const g = fx.glow;
+    const a = Math.max(0, g.life / g.max);
+    // 缓入：刚触发时几乎看不见，0.15s 内涨到峰值再退。
+    // 线性淡出会变成"啪一下亮起来然后慢慢暗"，那是闪光的形状，不是余温。
+    const k = Math.min(1, (1 - a) * 4) * a;
+    const rg = ctx.createRadialGradient(CX, CY, Math.min(VW, VH) * 0.30, CX, CY, Math.max(VW, VH) * 0.74);
+    rg.addColorStop(0, g.color.replace('ALPHA', '0'));
+    rg.addColorStop(0.55, g.color.replace('ALPHA', (k * 0.10 * g.a).toFixed(3)));
+    rg.addColorStop(1, g.color.replace('ALPHA', (k * 0.62 * g.a).toFixed(3)));
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, 0, VW, VH);
+  }
+
   floats(fx) {
     if (!fx || !fx.floats) return;
     const ctx = this.ctx;
@@ -1789,14 +1819,24 @@ export class Renderer {
 
   comboMeter(game) {
     const ctx = this.ctx;
-    const pips = 12;
+    // 11 格 × 每格 2 点 = 满格 22，正好是最后一档（RUSH）的线。
+    // 上一版是 12 格 × 每格 1 点，满格 12——但连消能到 22，
+    // 后半段整条一直是满的，"快满了"这件事就消失了。
+    const pips = 11;
+    const perPip = 2;
     const w = 20, gap = 6;
     const total = pips * w + (pips - 1) * gap;
     const x0 = CX - total / 2;
     const y = 700;
-    const filled = Math.min(game.combo, pips);
+    const filled = Math.min(Math.ceil(game.combo / perPip), pips);
     const mult = comboMult(game.combo);
-    const hot = game.combo >= 10;
+    // 整条按**当前档位**统一上色。上一版是按格子的位置配色（前三格蓝、
+    // 中间金、末尾红），那读的是"进度到哪了"，不是"我在第几档"——
+    // 而档位才是这一轮要传达的东西。
+    const tier = comboTierIndex(game.combo);
+    const tc = tier ? COMBO_TIERS[tier - 1].color : '#5AC8FA';
+    const trgb = tier ? hexRgb(tc) : '90,200,250';
+    const hot = tier >= 4;
 
     // 控制台底座。上一版是三根光秃秃的进度条浮在空地上，读起来像网页控件，
     // 和上面那台机器没有任何关系。垫一块面板、两端收个圆角，
@@ -1844,12 +1884,10 @@ export class Renderer {
       const on = i < filled;
       ctx.beginPath();
       ctx.roundRect(x, y, w, 6, 3);
-      ctx.fillStyle = on
-        ? (i >= 9 ? '#FF6B7A' : i >= 6 ? '#FFD65A' : '#5AC8FA')
-        : 'rgba(255,255,255,0.07)';
+      ctx.fillStyle = on ? tc : 'rgba(255,255,255,0.07)';
       if (on) {
-        ctx.shadowColor = i >= 9 ? 'rgba(255,90,110,0.8)' : i >= 6 ? 'rgba(255,200,80,0.7)' : 'rgba(90,200,250,0.7)';
-        ctx.shadowBlur = 9;
+        ctx.shadowColor = `rgba(${trgb},0.8)`;
+        ctx.shadowBlur = 9 + tier * 2;
       }
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -1860,17 +1898,19 @@ export class Renderer {
       const left = Math.max(0, 1 - (game.time - game.comboT) / 3.0);
       ctx.beginPath();
       ctx.roundRect(x0, y + 11, total * left, 2.5, 1.2);
-      ctx.fillStyle = `rgba(150,230,255,${0.15 + 0.5 * left})`;
+      ctx.fillStyle = `rgba(${trgb},${0.15 + 0.55 * left})`;
       ctx.fill();
     }
 
     // 状态文案：放在控制台正下方，不再和浮字抢同一行
     ctx.textAlign = 'center';
     if (game.combo >= 2) {
-      const k = Math.min(1, game.combo / 12);
+      const name = tier ? COMBO_TIERS[tier - 1].name : '';
       ctx.font = `700 13px ${MONO}`;
-      ctx.fillStyle = hot ? `rgba(255,120,130,${0.6 + 0.4 * Math.sin(this.t * 9)})` : `rgba(255,214,90,${0.55 + 0.45 * k})`;
-      ctx.fillText(`连消 ${game.combo}${hot ? '　RUSH!' : ''}`, CX, y + 40);
+      ctx.fillStyle = hot
+        ? `rgba(${trgb},${0.6 + 0.4 * Math.sin(this.t * 9)})`
+        : `rgba(${trgb},${0.55 + 0.45 * Math.min(1, game.combo / 10)})`;
+      ctx.fillText(`${name ? name + ' · ' : ''}连消 ${game.combo}`, CX, y + 40);
     } else {
       ctx.font = `600 11px ${MONO}`;
       ctx.fillStyle = 'rgba(160,200,250,0.22)';

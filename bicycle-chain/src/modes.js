@@ -69,7 +69,7 @@ export const MODES = [
     // 总分里很实在的一块，而玩家几乎无法主动规划（槽位是随机换的）。
     // 换成按分位重划之后，段位分布的形状和上一版一致：C≈p10 / B≈p25 /
     // A≈p50 / S≈p75 / SS≈p85，只是绝对数值跟着分数一起下来。
-    tiers: [0, 8900, 11000, 12100, 14300],
+    tiers: [0, 10900, 12400, 15000, 19000],
     cfg: {
       stages: [[0, 1], [20, 2]],
       beatStart: 3.40, beatEnd: 2.05, rampSec: 90, levelTime: 90,
@@ -80,7 +80,7 @@ export const MODES = [
       colorSteps: [[0, 4]],
       vMax: 13, drift: 1.35, accel: 55,
       volley: 2, rotate: false,
-      specialStart: 15, wildRate: 0.05, bombRate: 0.042,
+      specialStart: 15, wildRate: 0.030, bombRate: 0,
       rustStart: 24, rustEvery: 8,
     },
   },
@@ -92,7 +92,7 @@ export const MODES = [
     geo: { r: 3, c: 4.5, n: 20 },
     layout: 1,
     // 机器人 40 局：p10≈3891 p25≈4287 p50≈4798 p75≈5970 p85≈6699
-    tiers: [0, 3900, 4300, 4800, 6300],
+    tiers: [0, 4750, 5460, 5990, 6900],
     cfg: {
       stages: [[0, 1]],
       beatStart: 2.50, beatEnd: 1.50, rampSec: 60, levelTime: 60,
@@ -102,7 +102,7 @@ export const MODES = [
       vMax: 11, drift: 1.20, accel: 50,
       volley: 1, rotate: false,
       // 短局给得更保守：60 秒里塞 4 颗锈球就够，再多会盖过"练习"的定位。
-      specialStart: 12, wildRate: 0.06, bombRate: 0.05,
+      specialStart: 12, wildRate: 0.034, bombRate: 0,
       rustStart: 24, rustEvery: 11,
     },
   },
@@ -114,7 +114,7 @@ export const MODES = [
     geo: { r: 5.5, c: 9, n: 40 },
     layout: 2,
     // 机器人 40 局：p10≈13156 p25≈14072 p50≈15278 p75≈18455 p85≈19841
-    tiers: [0, 13100, 14100, 15300, 18700],
+    tiers: [0, 15800, 17700, 20400, 24100],
     cfg: {
       stages: [[0, 1], [25, 2]],
       beatStart: 3.80, beatEnd: 2.20, rampSec: 120, levelTime: 120,
@@ -123,7 +123,7 @@ export const MODES = [
       vMax: 15.4, drift: 1.50, accel: 60,
       volley: 2, rotate: false,
       // 40 格大盘最耐得住脏，锈球可以密一点，正好用掉它的空间优势。
-      specialStart: 18, wildRate: 0.05, bombRate: 0.042,
+      specialStart: 18, wildRate: 0.030, bombRate: 0,
       rustStart: 26, rustEvery: 7,
     },
   },
@@ -135,7 +135,7 @@ export const MODES = [
     geo: { r: 4.6, c: 6.5, n: 30 },
     layout: 3,
     // 机器人 40 局：p10≈6046 p25≈6360 p50≈7238 p75≈8520 p85≈10081
-    tiers: [0, 6000, 6600, 7300, 8900],
+    tiers: [0, 7050, 8400, 9750, 10800],
     cfg: {
       stages: [[0, 1], [12, 2], [30, 3]],
       beatStart: 3.90, beatEnd: 2.60, rampSec: 75, levelTime: 75,
@@ -146,7 +146,7 @@ export const MODES = [
       // 结构上必死。所以三射口本身「轮转两发」：每拍有且只有一个口休息，
       // 下一个节拍换一个口休息。三个落点仍然全部参与，压力却回到 2 球/拍。
       volley: 2, rotate: true,
-      specialStart: 14, wildRate: 0.055, bombRate: 0.045,
+      specialStart: 14, wildRate: 0.032, bombRate: 0,
       rustStart: 24, rustEvery: 9,
     },
   },

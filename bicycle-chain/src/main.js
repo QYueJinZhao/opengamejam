@@ -1,9 +1,9 @@
-import { Game, BASE_CFG } from './sim.js';
+import { Game, CFG, BASE_CFG, WILD, BOMB, ballSkin, COMBO_TIERS, comboTierIndex } from './sim.js';
 import { Renderer, arcToScreen } from './render.js';
 import { Sfx } from './audio.js';
 import { MODES, modeIndex, TIERS, scoreBand } from './modes.js';
 import { botInput } from './bot.js';
-import { D, N } from './geom.js';
+import { D, N, mod } from './geom.js';
 
 const DT = 1 / 120;
 
@@ -49,9 +49,14 @@ const ui = {
   deadAt: 0,
 };
 
-const fx = { parts: [], floats: [], shocks: [], beams: [], ghosts: [], flash: 0, shake: 0 };
+const fx = { parts: [], floats: [], shocks: [], beams: [], ghosts: [], flash: 0, shake: 0, glow: null };
 
 let game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id);
+
+// ?combo=N 把连消直接顶到 N 并停住。这个开关只有一个用途：单独看某一档的
+// 演出长什么样。连消是时效性的，靠实战截图撞某一档要碰运气，
+// 而档位的颜色/尺寸/辉光必须五档逐个比对才能调。
+const comboParam = Number(params.get('combo') || 0);
 let paused = false;
 let silent = false;
 
@@ -70,8 +75,16 @@ const PART_RGB = {
   12: '150,140,125', // 锈
 };
 
-function burst(x, y, ci, count = 9, power = 1) {
-  const rgb = PART_RGB[ci] || '255,255,255';
+// 档位颜色是十六进制字符串，而粒子/冲击波要的是 "r,g,b" 片段。
+// 这个转换看着琐碎，但它让"档位只定义一次颜色"成立——否则每加一档，
+// 都要在浮字、冲击波、粒子三处各写一遍 rgb。
+function hexRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
+
+function burst(x, y, ci, count = 9, power = 1, rgbOverride = null) {
+  const rgb = rgbOverride || PART_RGB[ci] || '255,255,255';
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2;
     const sp = (44 + Math.random() * 196) * power;
@@ -120,23 +133,26 @@ function handleEvents() {
       if (!silent) sfx.thud();
     } else if (e.type === 'clear') {
       const mid = arcToScreen(e.s0 + e.len * 0.5 * D);
+      // 消除长度决定这一下的颜色：3 连冷白、4 连琥珀、5 连紫。
+      // 这是"我这一下值钱"的第一个信号——它比浮字早到，而且贴着轨道，
+      // 玩家盯着炮口时余光也能看见。
+      const rank = e.len >= CFG.rewardWildAt ? 2 : e.len >= CFG.rewardBombAt ? 1 : 0;
       const gold = e.chain >= 2 || e.combo >= 6;
+      const tint =
+        rank === 2 ? 'rgba(199,125,255,ALPHA)' :
+        rank === 1 ? 'rgba(255,194,74,ALPHA)' :
+        gold ? 'rgba(255,214,90,ALPHA)' : 'rgba(200,235,255,ALPHA)';
       // 三消演出总长从 ~0.4s 拉到 ~0.7s：光带、冲击波、残影、粒子四条线
       // 同时存在才读得出"消除"这件事，只有一条会变成一闪。
-      beam(
-        e.s0, e.len, 0.62,
-        gold ? 'rgba(255,214,90,ALPHA)' : 'rgba(200,235,255,ALPHA)',
-        7 + Math.min(6, e.chain * 2)
-      );
+      beam(e.s0, e.len, 0.62 + rank * 0.06, tint, 7 + Math.min(6, e.chain * 2) + rank * 3);
       shock(
-        mid.x, mid.y, 10, 60 + e.chain * 26, 0.68,
-        gold ? 'rgba(255,214,90,ALPHA)' : 'rgba(180,225,255,ALPHA)', 3
+        mid.x, mid.y, 10, 60 + e.chain * 26 + rank * 22, 0.68 + rank * 0.06, tint, 3 + rank * 0.8
       );
 
       for (let i = 0; i < e.positions.length; i++) {
         const sp = arcToScreen(e.positions[i]);
         ghost(sp.x, sp.y, e.colors[i], 0.52 + e.chain * 0.05);
-        burst(sp.x, sp.y, e.colors[i], e.chain >= 2 ? 12 : 8, e.chain >= 2 ? 1.35 : 1);
+        burst(sp.x, sp.y, e.colors[i], (e.chain >= 2 ? 12 : 8) + rank * 4, (e.chain >= 2 ? 1.35 : 1) + rank * 0.15);
       }
 
       float(`+${e.gain}`, mid.x, mid.y - 30, e.chain >= 2 ? 32 : 26, e.chain >= 2 ? '#FFD65A' : '#E8F0FA');
@@ -147,9 +163,9 @@ function handleEvents() {
         float(`连消 ×${e.comboMult.toFixed(2)}`, mid.x, mid.y - 88, 17, '#9BE9FF');
       }
 
-      fx.shake = Math.min(26, fx.shake + 2.2 + e.chain * 2.4 + Math.min(6, e.combo * 0.3));
-      fx.flash = Math.min(0.42, fx.flash + 0.03 + e.chain * 0.02);
-      if (!silent) sfx.clear(e.chain, e.combo);
+      fx.shake = Math.min(30, fx.shake + 2.2 + e.chain * 2.4 + Math.min(6, e.combo * 0.3) + rank * 3);
+      fx.flash = Math.min(0.5, fx.flash + 0.03 + e.chain * 0.02 + rank * 0.05);
+      if (!silent) sfx.clear(e.chain, e.combo, rank);
     } else if (e.type === 'bomb') {
       // 爆破球：演出必须比三消更"钝"。三消是清脆的（光带 + 琶音），
       // 爆破是低频的（大冲击波 + 慢闪 + 闷响），两者靠质感区分而不是靠音量。
@@ -172,10 +188,55 @@ function handleEvents() {
       float('锈球', p.x, p.y - 26, 13, 'rgba(198,188,174,0.9)');
       if (!silent) sfx.clank();
     } else if (e.type === 'combo') {
-      if (!silent && (e.combo === 3 || e.combo === 6 || e.combo === 10)) {
-        sfx.rushUp(e.combo);
-        float(`连消 ${e.combo}`, 600, 612, 20, '#9BE9FF');
+      // 五档各有自己的演出。上一版是"同一句话换个数字"，玩家读不出自己在爬坡。
+      // 档位越高，落点越多、越亮、屏幕边缘越红——这是唯一能让"我快撑不住了
+      // 但我不想断"这种情绪成立的信号。
+      const t = COMBO_TIERS[(e.tier || 1) - 1];
+      const rgb = hexRgb(t.color);
+      // 不在这里放"凌厉 · 连消 6"这种浮字：底部控制台已经在显示同一句话，
+      // 两处同时出现只会变成重影（实测低档位连跳时，三行字会在轨道上叠住）。
+      // 档位的信息交给控制台（持续可见），档位的**冲击**交给冲击波和辉光。
+      // 只有最高两档值得在画面中心喊一句——那是里程碑，不是常规读数。
+      if (e.tier >= 4) {
+        float(`　${t.name}！`, 600, 330, t.size + 8, t.color);
       }
+
+      if (e.tier >= 2) {
+        shock(600, 400, 40, 210 + e.tier * 30, 0.85, `rgba(${rgb},ALPHA)`, 2 + e.tier * 0.5);
+      }
+      if (e.tier >= 3) {
+        // 内圈白热：只有一到三圈，作用是给外圈一个"起点"，不然光环像飘着
+        shock(600, 400, 12, 130 + e.tier * 26, 0.55, 'rgba(255,255,255,ALPHA)', 2.4);
+        fx.flash = Math.min(0.5, fx.flash + 0.06 * (e.tier - 2));
+      }
+      if (e.tier >= 4) {
+        for (let i = 0; i < 10; i++) {
+          const a = (i / 10) * Math.PI * 2 + e.combo * 0.3;
+          burst(600 + Math.cos(a) * 150, 400 + Math.sin(a) * 110, -1, 3, 1.2, rgb);
+        }
+      }
+      if (e.tier >= 5) {
+        fx.glow = { color: `rgba(${rgb},ALPHA)`, life: 1.4, max: 1.4, a: 0.55 };
+      }
+      fx.shake = Math.min(38, fx.shake + t.shake);
+      if (!silent) sfx.comboTier(e.tier);
+    } else if (e.type === 'reward') {
+      // 奖励球：从"我消了 4 颗"到"我下一发有炸弹了"必须有一条可见的路径，
+      // 否则玩家只会觉得炸弹是天上掉的。这里在炮口位置放双环 + 名字。
+      const p = arcToScreen(e.s);
+      const wild = e.ci === WILD;
+      const c = ballSkin(e.ci);
+      const rgb = wild ? '199,125,255' : '255,150,60';
+      // 炮口在轨道点外侧约 37px（nozzleGap 3.7 × S）。浮字必须落在炮口**之上**
+      // 的空白处：往下 34px 正好压在珠链上，"爆破球"三个字会被三颗珠子切开。
+      const cx = p.x, cy = p.y - 37;
+      shock(cx, cy, 8, wild ? 104 : 74, 0.62, `rgba(${rgb},ALPHA)`, 3.6);
+      shock(cx, cy, 3, wild ? 48 : 36, 0.36, 'rgba(255,255,255,ALPHA)', 2.2);
+      // 炮管是竖的，正上方 50px 就是挂板，垂直方向没有位置可放。
+      // 所以文字往**画面中心**偏：左炮往右、右炮往左，落点都是两炮之间的空地。
+      const dx = p.x < 600 ? 78 : -78;
+      float(wild ? '彩虹万能' : '爆破球', cx + dx, cy + 4, wild ? 23 : 20, wild ? '#C77DFF' : '#FF9A4A');
+      if (!silent) sfx.reward(wild);
     } else if (e.type === 'combobreak') {
       if (!silent) sfx.rushBreak();
       float('连消中断', 600, 612, 16, 'rgba(255,140,150,0.9)');
@@ -249,6 +310,12 @@ function updateFx(dt) {
   if (fx.shake < 0.2) fx.shake = 0;
   fx.flash *= Math.exp(-dt * 7.5);
   if (fx.flash < 0.002) fx.flash = 0;
+  // 屏幕边缘辉光是"场上有事在持续发生"，它必须衰减得比闪白慢：
+  // 闪白是一下，辉光是余温。快衰减会变成又一次闪烁，跟 flash 重复。
+  if (fx.glow) {
+    fx.glow.life -= dt * 0.9;
+    if (fx.glow.life <= 0) fx.glow = null;
+  }
 }
 
 let acc = 0;
@@ -436,6 +503,14 @@ if (ffParam > 0) {
     handleEvents();
     checkTier();
     updateFx(DT);   // 快进时一并推进特效寿命，截出来的就是"刚好消除后"的画面
+  }
+  // 必须放在快进**之后**：?auto=1 会重建 Game，写在前面会被覆盖掉。
+  if (comboParam > 0) {
+    game.combo = comboParam;
+    game.comboT = game.time;
+    game.comboTier = comboTierIndex(comboParam);
+    game.maxCombo = comboParam;
+    paused = true;
   }
   lastNozzles = game.nozzleCount();
   // 走正常结算：否则快进到死不会写 best，调试截图和真实游玩的战绩会不一致

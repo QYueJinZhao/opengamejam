@@ -220,7 +220,7 @@ export class Sfx {
   beat() { this.tone({ freq: 90, to: 64, dur: 0.08, type: 'sine', gain: 0.08 }); }
 
   /** 消除：chain 决定音高，rush 决定叠加的亮度 */
-  clear(chain = 1, rush = 1) {
+  clear(chain = 1, rush = 1, rank = 0) {
     const i = Math.min(Math.max(chain, 1) - 1, PENTA.length - 1);
     const f = PENTA[i];
     // 尾音跟着视觉一起拉长（0.16→0.24）。三消演出到了 0.7s，
@@ -234,6 +234,14 @@ export class Sfx {
     if (rush >= 4) {
       const up = PENTA[Math.min(rush % 6, 5)] * 2;
       this.tone({ freq: up, dur: 0.16, type: 'sine', gain: 0.04, at: 0.07 });
+    }
+    // 长消除（4 连给炸弹、5 连给万能）必须和普通三消听得出区别，
+    // 否则"我这一下值钱"只能靠看，而玩家在这一刻通常在看炮口。
+    if (rank === 1) {
+      this.tone({ freq: f * 3, dur: 0.09, type: 'square', gain: 0.030, at: 0.05 });
+    } else if (rank >= 2) {
+      this.tone({ freq: f * 4, dur: 0.22, type: 'sine', gain: 0.055, at: 0.05 });
+      this.tone({ freq: f * 3, dur: 0.18, type: 'triangle', gain: 0.040, at: 0.09 });
     }
   }
 
@@ -267,6 +275,50 @@ export class Sfx {
   rushUp(n) {
     const f = PENTA[Math.min(n, 5)] || PENTA[5];
     this.tone({ freq: f * 1.5, dur: 0.09, type: 'sine', gain: 0.05 });
+  }
+
+  /**
+   * 连消跨档。音高、层数、尾巴都随档位走。
+   *
+   * 上一版所有档位都是同一个 0.09s 的单音——那等于告诉玩家"这几件事一样重要"。
+   * 现在第 1 档只有一个音，第 5 档是上行音串 + 亮泛音 + 噪声尾巴，
+   * 不用看屏幕也能听出自己在第几档。
+   */
+  comboTier(tier = 1) {
+    const t = Math.min(Math.max(tier, 1), 5);
+    const roots = [659.25, 783.99, 880.0, 1046.5, 1174.66];
+    const notes = t;                       // 档位 = 音符个数
+    const g = 0.045 + t * 0.008;
+    for (let i = 0; i < notes; i++) {
+      const f = roots[t - 1] * Math.pow(2, (i * (t >= 4 ? 2 : 3)) / 12);
+      this.tone({ freq: f, dur: 0.10 + t * 0.03, type: 'sine', gain: g, at: i * 0.048 });
+    }
+    if (t >= 3) {
+      this.tone({ freq: roots[t - 1] * 2, dur: 0.20, type: 'triangle', gain: g * 0.45, at: 0.02 });
+    }
+    if (t >= 4) {
+      this.noise({ dur: 0.26, gain: 0.030, freq: 6800, q: 0.6, at: 0.06 });
+    }
+    if (t >= 5) {
+      this.tone({ freq: 88, to: 62, dur: 0.34, type: 'sine', gain: 0.10 });
+    }
+  }
+
+  /**
+   * 拿到奖励球。爆破和万能必须听得出区别：
+   * 爆破是"金属装上膛"（短促、下行、带噪声），万能是"水晶亮起来"（上行、纯音）。
+   */
+  reward(wild = false) {
+    if (wild) {
+      [0, 0.055, 0.11, 0.17].forEach((at, i) => {
+        this.tone({ freq: PENTA[i + 2] * 2, dur: 0.20, type: 'sine', gain: 0.062, at });
+      });
+      this.noise({ dur: 0.22, gain: 0.028, freq: 7600, q: 0.7, at: 0.03 });
+    } else {
+      this.tone({ freq: 200, to: 330, dur: 0.13, type: 'square', gain: 0.048 });
+      this.tone({ freq: 150, to: 120, dur: 0.10, type: 'sine', gain: 0.06, at: 0.02 });
+      this.noise({ dur: 0.09, gain: 0.032, freq: 2400, q: 1.2 });
+    }
   }
 
   rushBreak() {

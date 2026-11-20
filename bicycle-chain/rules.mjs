@@ -1,4 +1,4 @@
-import { Game, CFG, WILD, BOMB, RUST, isColor } from './src/sim.js';
+import { Game, CFG, WILD, BOMB, RUST, isColor, comboTierIndex } from './src/sim.js';
 import { N, mod } from './src/geom.js';
 import { botInput } from './src/bot.js';
 
@@ -47,6 +47,93 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   g.resolve(-1, 0);
   ok(g.slots[mod(s, N)] === null, '消除段左侧的锈球被震碎');
   ok(g.occupied() === 0, `整段连同锈球一起清空（剩 ${g.occupied()}）`);
+}
+
+// 5) 消除驱动的奖励球：4 连给爆破、5 连给万能，都插在待发位
+{
+  const setup = (n) => {
+    const g = new Game(21, 'standard');
+    g.slots.fill(null);
+    for (let i = 0; i < n; i++) g.slots[mod(10 + i, N)] = g.makeBead(1);
+    return g;
+  };
+
+  const g4 = setup(4);
+  const q4 = g4.queues[0];
+  const tail = q4[2];
+  const lenBefore = q4.length;
+  g4.drainEvents();
+  g4.resolve(-1, g4.nozzleOff[0]);
+  const rev = g4.drainEvents().find((e) => e.type === 'reward');
+  ok(q4[0] === BOMB, `4 连后待发球变成爆破球（得到 ${q4[0]}）`);
+  ok(q4.length === lenBefore, `队列长度不变（${q4.length}）`);
+  // 直接比对事件里的 dropped，而不是看队列末位：基础色只有 4 种，
+  // 末尾那颗被挤掉之后补上同色的概率是 25%，按"末位变了"判会偶发假阴性。
+  ok(rev && rev.dropped === tail, '末尾预览球被挤掉（事件里记录了 dropped）');
+
+  const g5 = setup(5);
+  g5.resolve(-1, g5.nozzleOff[0]);
+  ok(g5.queues[0][0] === WILD, `5 连后待发球变成万能球（得到 ${g5.queues[0][0]}）`);
+
+  const g3 = setup(3);
+  const ci3 = g3.queues[0][0];
+  g3.resolve(-1, g3.nozzleOff[0]);
+  ok(g3.queues[0][0] === ci3 && g3.rewards === 0, '3 连不给奖励球');
+}
+
+// 6) 一次结算只给一颗：连锁里的第二段四连不重复发
+{
+  const g = new Game(22, 'standard');
+  g.slots.fill(null);
+  for (let i = 0; i < 4; i++) g.slots[mod(10 + i, N)] = g.makeBead(2);
+  for (let i = 0; i < 4; i++) g.slots[mod(24 + i, N)] = g.makeBead(3);
+  const r0 = g.rewards;
+  g.resolve(-1, g.nozzleOff[0]);
+  ok(g.rewards - r0 === 1, `两段四连只发一颗奖励球（发了 ${g.rewards - r0} 颗）`);
+}
+
+// 7) 爆破清 5 格不算四连：奖励只认匹配消除
+{
+  const g = new Game(23, 'standard');
+  g.slots.fill(null);
+  for (let i = 0; i < 8; i++) g.slots[mod(8 + i, N)] = g.makeBead(i % 4);
+  const r0 = g.rewards;
+  g.detonate(10, g.nozzleOff[0]);
+  ok(g.rewards === r0, '爆破球炸 5 格不触发奖励球');
+}
+
+// 8) 随机炸弹已归零，随机万能仍在
+{
+  const g = new Game(24, 'standard');
+  g.time = 60;
+  let bomb = 0, wild = 0;
+  for (let i = 0; i < 4000; i++) {
+    const ci = g.pickShot();
+    if (ci === BOMB) bomb++;
+    if (ci === WILD) wild++;
+  }
+  ok(bomb === 0, `随机补球不再产生爆破球（${bomb} 次）`);
+  ok(wild > 100, `随机补球仍有万能球（${wild}/4000）`);
+}
+
+// 9) 连消档位也是奖励来源：跨入「凌厉」给爆破，跨入「爆发」给万能
+{
+  const trial = (combo0, extra) => {
+    const g = new Game(25, 'standard');
+    g.slots.fill(null);
+    g.combo = combo0;
+    g.comboT = g.time;
+    g.comboTier = comboTierIndex(combo0);
+    for (let i = 0; i < extra; i++) g.slots[mod(10 + i, N)] = g.makeBead(1);
+    g.resolve(-1, g.nozzleOff[0]);
+    return g;
+  };
+  const a = trial(5, 3);    // 5 → 8，跨过凌厉(6)
+  ok(a.queues[0][0] === BOMB, `跨入凌厉档给爆破球（得到 ${a.queues[0][0]}，combo ${a.combo}）`);
+  const b = trial(11, 3);   // 11 → 14，跨过爆发(12)
+  ok(b.queues[0][0] === WILD, `跨入爆发档给万能球（得到 ${b.queues[0][0]}，combo ${b.combo}）`);
+  const c = trial(7, 3);    // 7 → 10，仍在凌厉档(6~11)内，不重复给
+  ok(c.rewards === 0, '档位内继续消除不重复发奖励');
 }
 
 // 5) 锈球：不能自己凑三消

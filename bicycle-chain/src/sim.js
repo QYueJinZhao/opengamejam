@@ -90,12 +90,22 @@ export const BASE_CFG = {
   rotate: false,
 
   // ---- 特殊球 ----
-  // 概率是「每次补球」的独立概率，不是场上占比。设计意图：
-  //   万能球是"补洞"的工具，不能多，多了就没有卡色的紧张感；
-  //   爆破球是"止损"的工具，也不能多，否则盘面永远炸得空。
+  // 现在是**双轨**：
+  //   万能球：随机补给（wildRate）+ 5 连奖励。它是"补洞工具"，必须稳定有货源；
+  //   爆破球：完全由 4 连产出（bombRate 归零）。它是"你挣来的"，不是抽到的。
+  //
+  // 为什么把随机炸弹清零：两套供给会叠加。实测一局 54 次补球里，随机炸弹给
+  // 2.3 颗、4 连奖励给 2.9 颗，合计 5.2 颗 × 5 格 = 26 格，超过盘面总量的一半，
+  // 盘面会被炸到再也凑不出四连——奖励机制把自己的触发条件吃掉了。
   specialStart: 15,     // 前 15 秒纯基础色，先把三色三消教会
-  wildRate: 0.065,
-  bombRate: 0.055,
+  wildRate: 0.030,
+  bombRate: 0,
+
+  // ---- 消除驱动的奖励球 ----
+  // 判定只看本次结算的**首段**（chain === 1）。连锁段本身已经有 ×倍率，
+  // 再叠特殊球会让一次结算给两颗，而且"一串连锁里哪一段给"说不清。
+  rewardBombAt: 4,      // 首段消满 4 颗 → 下一发换成爆破球
+  rewardWildAt: 5,      // 首段消满 5 颗 → 下一发换成彩虹万能球
 
   // 锈球：从 rustStart 起，每 rustEvery 秒往链条尾端塞一颗。
   // 它不是"发球发歪了"，是**时间压力**——放着不管，跑道会被死重吃掉，
@@ -124,6 +134,33 @@ const CHAIN_MULT = [1, 1.6, 2.6, 4.2, 6.5, 9.0];
 // 那个条件等于永远拿不到加成（机器人峰值连击只有 3.6）。
 const COMBO_MULT = [1, 1, 1.1, 1.2, 1.35, 1.5, 1.65, 1.8, 2.0, 2.2, 2.4, 2.6, 2.9, 3.2, 3.5, 3.8, 4.1, 4.4, 4.7, 5.0, 5.3];
 const COMBO_WINDOW = 3.0;
+
+/**
+ * 连消档位。
+ *
+ * 上一版只有一档：combo 到 3/6/10/15 各弹一次同样的浮字、放同一个音效。
+ * 问题不是"不好看"，是**玩家读不出自己在爬坡**——10 连和 3 连的反馈长得一样，
+ * 唯一的差别是乘率数字，而数字在盘面中心，三个球一消就没人看。
+ *
+ * 现在五档各有自己的颜色、尺寸、屏幕边缘辉光强度和音高。
+ * 之所以是"跨档触发"而不是"每次消除都播"：档位是里程碑，里程碑必须稀有；
+ * 每消一次都炸一下，三次之后玩家就学会了无视它。
+ */
+export const COMBO_TIERS = [
+  { at: 3,  name: '起势', color: '#7FD8FF', size: 18, glow: 0.10, shake: 1.5 },
+  { at: 6,  name: '凌厉', color: '#4CF0C0', size: 21, glow: 0.18, shake: 2.5 },
+  { at: 12, name: '爆发', color: '#FFD65A', size: 25, glow: 0.30, shake: 4.0 },
+  { at: 17, name: '极限', color: '#FF9A4D', size: 29, glow: 0.44, shake: 6.0 },
+  { at: 22, name: 'RUSH', color: '#FF5C8A', size: 34, glow: 0.60, shake: 8.5 },
+];
+
+/** 当前 combo 落在第几档（0 = 未入档，1~5 = 档位序号）。 */
+export function comboTierIndex(n) {
+  let t = 0;
+  for (let i = 0; i < COMBO_TIERS.length; i++) if (n >= COMBO_TIERS[i].at) t = i + 1;
+  return t;
+}
+
 const BASE_SCORE = (n) => (n === 3 ? 300 : n === 4 ? 500 : 800 + 400 * Math.max(0, n - 5));
 const SWEEP_BONUS = 1500;
 // 爆破球的基础分。故意低于一次普通三消（300），因为它的价值在"止损"，
@@ -204,12 +241,15 @@ export class Game {
     this.maxChain = 0;
     this.combo = 0;          // 连消：累计消除数，窗口内没有新消除才断
     this.comboT = -99;
+    this.comboTier = 0;      // 已经播报过的最高档位，防止同一档重复演出
     this.maxCombo = 0;
     this.volleyIndex = 0;    // 三射口：下一个休息的口
     this.rustClock = 0;
     this.rustPlaced = 0;
     this.bombs = 0;
     this.wilds = 0;
+    this.rewards = 0;        // 4/5 连挣来的奖励球累计
+    this.rewardIdx = 0;
     this.shots = 0;
     this.drops = 0;
     this.clears = 0;
@@ -403,6 +443,7 @@ export class Game {
     if (this.combo > 0 && this.time - this.comboT > COMBO_WINDOW) {
       if (this.combo >= 3) this.events.push({ type: 'combobreak', combo: this.combo });
       this.combo = 0;
+      this.comboTier = 0;
     }
 
     this.beatClock += dt;
@@ -522,9 +563,7 @@ export class Game {
     const gain = Math.round((BOMB_BASE + BOMB_BASE * 0.6 * (len - 1) + rustHit * 260) * comboMult);
     this.score += gain;
     this.clears++;
-    this.combo += len;
-    this.comboT = this.time;
-    this.maxCombo = Math.max(this.maxCombo, this.combo);
+    this.bumpCombo(len);
 
     this.events.push({
       type: 'bomb', slot: c, off, hit: len, col: colors, positions,
@@ -632,22 +671,60 @@ export class Game {
     this.events.push({ type: 'rust', slot: at, s: mod(at + this.phase, N) * D });
   }
 
+  /**
+   * 累加连消，并在**跨档**时播报。
+   *
+   * 之所以不写成 `combo === 3 || combo === 6 || ...`：combo 一次可能加 4 或 5，
+   * 从 4 直接跳到 8 就会把第 6 颗那档整段跳过——玩家打得越猛，反而越听不到
+   * 里程碑。这里改成"当前落在第几档 > 已播报过的档位"，跨档必报，一次跨两档
+   * 也只报最高那档（两段音效叠在一起会糊）。
+   */
+  bumpCombo(n, off = 0) {
+    this.combo += n;
+    this.comboT = this.time;
+    this.maxCombo = Math.max(this.maxCombo, this.combo);
+
+    const tier = comboTierIndex(this.combo);
+    if (tier > this.comboTier) {
+      this.comboTier = tier;
+      const t = COMBO_TIERS[tier - 1];
+      this.events.push({ type: 'combo', combo: this.combo, tier, tierName: t.name, off });
+      // 一次可能跨两档（combo 从 4 直接吃到 11），返回目标档位即可
+      return tier;
+    }
+    return 0;
+  }
+
   // ---- 消除 + 连锁 + 连消 ----
   resolve(startSlot = -1, off = 0) {
     let chain = 0;
+    let reward = 0;
+    let crossedTier = 0;
     for (let guard = 0; guard < 24; guard++) {
       const run = this.findMatch();
       if (!run) break;
 
       chain++;
+
+      // 奖励路线有两条，一次结算只发一颗，长度路线优先：
+      //
+      //   长度路线（设计稿原案）：4 颗 → 爆破球，5 颗 → 万能球
+      //   档位路线（实测补的）：跨入「凌厉」→ 爆破球，跨入「爆发」→ 万能球
+      //
+      // 为什么必须补第二条：4 色盘面上，链条上永远不会有 3 颗相邻同色（会立即消），
+      // 所以落一颗球要形成 4 连，得恰好落在 "XX_X" 这种缝里。实测 10 局只出现
+      // 1 次 4 连——这条规则等于不存在。而"连消不断"是玩家能主动追的东西，
+      // 实测每局能跨 4 次「凌厉」。
+      //
+      // 长度路线保留，是因为它一旦出现就该重奖：玩家真的把 4 颗拼到一起时，
+      // 系统必须认账。
+      if (chain === 1 && run.len >= CFG.rewardBombAt) {
+        reward = run.len >= CFG.rewardWildAt ? WILD : BOMB;
+      }
       // 连消按「消掉的颗数」累加：一次四消直接 +4，比按次数累加更容易起势，
       // 也更符合玩家对"连消"的直觉（消得越多，加得越快）。
-      this.combo += run.len;
-      this.comboT = this.time;
-      this.maxCombo = Math.max(this.maxCombo, this.combo);
-      if (this.combo === 3 || this.combo === 6 || this.combo === 10 || this.combo === 15) {
-        this.events.push({ type: 'combo', combo: this.combo });
-      }
+      const crossed = this.bumpCombo(run.len, off);
+      if (crossed > crossedTier) crossedTier = crossed;
 
       // 消除段两侧的锈球被震碎，一起并进本次清除。
       // 必须并进**同一段**：如果单独删掉侧面的锈球，链条中间就会留下洞，
@@ -684,7 +761,9 @@ export class Game {
 
       this.events.push({
         type: 'clear', chain, gain, base, chainMult, comboMult, rustN,
-        colors, positions, len, off, s0,
+        // len 是"本次清掉多少颗"（含两侧被震碎的锈球），matchLen 是真正匹配到
+        // 同色的长度。奖励球只认 matchLen：锈球是顺带震碎的，不是凑出来的。
+        colors, positions, len, matchLen: run.len, off, s0,
         combo: this.combo,
       });
 
@@ -696,6 +775,12 @@ export class Game {
       this.chainT = this.time;
       this.maxChain = Math.max(this.maxChain, chain);
 
+      if (!reward) {
+        if (crossedTier >= 3) reward = WILD;
+        else if (crossedTier >= 2) reward = BOMB;
+      }
+      if (reward) this.grantReward(reward, off);
+
       // 清空跑道：给一次大额奖励，鼓励"敢把盘面打空"
       if (this.occupied() === 0) {
         this.score += SWEEP_BONUS;
@@ -705,6 +790,33 @@ export class Game {
     } else {
       this.chain = 0;
     }
+  }
+
+  /**
+   * 把奖励球塞进队列的**待发位**，并挤掉末尾那颗预览球。
+   *
+   * 为什么插最前面而不是附加：奖励必须"下一发就能用"，否则玩家感受不到因果
+   * ——4 连和两拍后的某颗球之间建立不了联系。
+   *
+   * 为什么必须挤掉一颗：队列定长 3 是有意义的（待发 + 两个预览，等于"我接下来
+   * 能规划两步"）。变长会悄悄改掉节奏。挤掉末尾那颗是**代价**，也是这个奖励
+   * 唯一的分量：你用一个已知信息换了一个强力球。
+   */
+  grantReward(ci, off = 0) {
+    const i = this.nozzleOff.indexOf(off);
+    const idx = i >= 0 ? i : (this.rewardIdx % this.queues.length);
+    this.rewardIdx = (idx + 1) % this.queues.length;
+
+    const q = this.queues[idx];
+    const dropped = q.length >= 3 ? q.pop() : null;
+    q.unshift(ci);
+    this.rewards++;
+
+    this.events.push({
+      type: 'reward', ci, idx, off: this.nozzleOff[idx],
+      dropped, len: q.length,
+      s: mod(this.nozzleOff[idx], N) * D,
+    });
   }
 
   findMatch() {
