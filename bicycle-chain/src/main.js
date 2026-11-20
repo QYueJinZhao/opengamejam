@@ -1,4 +1,4 @@
-import { Game, CFG, BASE_CFG, WILD, BOMB, ballSkin, COMBO_TIERS, comboTierIndex } from './sim.js';
+import { Game, CFG, BASE_CFG, WILD, BOMB, ballSkin, COMBO_TIERS, TEMPO_MARKS, comboTierIndex } from './sim.js';
 import { Renderer, arcToScreen } from './render.js';
 import { Sfx } from './audio.js';
 import { MODES, modeIndex, TIERS, scoreBand } from './modes.js';
@@ -240,6 +240,18 @@ function handleEvents() {
       const dx = p.x < 600 ? 78 : -78;
       float(wild ? '彩虹万能' : '爆破球', cx + dx, cy + 4, wild ? 23 : 20, wild ? '#C77DFF' : '#FF9A4A');
       if (!silent) sfx.reward(wild);
+    } else if (e.type === 'tempo') {
+      // 节奏里程碑。位置放在左侧读表盘下面，不放画面中心：
+      // 它不是"这一下赚了多少"，而是"机器状态变了"，属于仪表盘的语义。
+      // 中心横幅留给段位和最高两档连消——中间那块地方一旦被常规读数占用，
+      // 真正的大事件就喊不响了。
+      const m = TEMPO_MARKS[(e.mark || 1) - 1];
+      // 写在 366 而不是 320：浮字在 1.3 秒的生命里会往上飘 46px，
+      // 从 320 起步会在生命后段正好穿过 TEMPO 进度条（268~277）和倍率数字（258）。
+      // 从 366 起步，全程停在进度条下方的空白里。
+      float(`${m.name}　×${e.mult.toFixed(2)}`, 140, 366, 19, m.color);
+      shock(140, 356, 4, 30 + e.mark * 10, 0.42, `rgba(${hexRgb(m.color)},ALPHA)`, 2);
+      if (!silent) sfx.tempoMark(e.mark);
     } else if (e.type === 'combobreak') {
       if (!silent) sfx.rushBreak();
       float('连消中断', 600, 612, 16, 'rgba(255,140,150,0.9)');
@@ -348,6 +360,9 @@ function frame(now) {
 
   const load = game ? game.occupied() / Math.max(1, N) : 0;
   sfx.setIntensity(load);
+  // 音乐跟着机器一起加速。没有这一下，HUD 上写着 ×1.45、耳朵听到的还是同一首歌，
+  // "机器变快了"就只是仪表盘上的一个数字——而节奏感首先是**听**出来的。
+  sfx.setTempo(game ? game.tempo : 0);
   sfx.update();
 
   renderer.draw(game, ui, fx);
@@ -414,6 +429,7 @@ function startRun(idx) {
   lastTier = 0;
   ui.best = ui.bests[mode.id] || 0;
   sfx.init();
+  sfx.setTempo(0);
   sfx.start();
   sfx.startMusic();
 }

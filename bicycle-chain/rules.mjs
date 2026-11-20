@@ -232,5 +232,83 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   ok(fires >= 12, `60 秒内出球 ${fires} 次（间隔约 ${(60 / Math.max(1, fires)).toFixed(2)}s）`);
 }
 
+// 12) 节奏：分数驱动的加速必须是**单调**的
+//
+// 这条守的是"随分数增加节奏变快"这一条需求本身。反例是两种：
+//   a) 分数涨了但 beat 没动（曲线没接上，或者被 tempoRef 截死了）；
+//   b) beat 会反弹（时间地板和分数曲线取 min 之后又加了平滑，抖动）。
+// 只要 beat 在整局里出现任何一次上升，玩家就会在"机器突然变慢"的那一刻
+// 感到莫名其妙——而那种抖动在数值上往往只有 0.02 秒，肉眼看不出来，
+// 只能靠这条断言抓。
+{
+  const g = new Game(41, 'standard');
+  let prevBeat = Infinity, rose = 0, minBeat = Infinity;
+  const checkpoints = [];
+  // 用瞄准机器人跑完整局：挂机 40 秒就爆仓了，曲线根本走不到满速。
+  for (let f = 0; f < 120 * 90; f++) {
+    g.setInput(botInput(g));
+    g.step(1 / 120);
+    g.drainEvents();
+    if (g.beat > prevBeat + 1e-9) rose++;
+    prevBeat = g.beat;
+    minBeat = Math.min(minBeat, g.beat);
+    if (f % 1200 === 0) checkpoints.push([Math.round(g.time), g.score, +g.tempo.toFixed(3), +g.beat.toFixed(3)]);
+    if (g.dead) break;
+  }
+  ok(rose === 0, `beat 在整局里从不上升（异常 ${rose} 次）`);
+  ok(minBeat >= CFG.beatRush - 1e-9, `beat 不会低于 beatRush（最低 ${minBeat.toFixed(3)} ≥ ${CFG.beatRush}）`);
+  ok(g.tempo >= 0.999, `一局之内节奏能走到满速（tempo ${g.tempo.toFixed(2)}，需要 ${CFG.tempoRef} 分）`);
+  console.log('  · 节奏曲线（秒 / 分 / tempo / beat）：' + checkpoints.map((c) => c.join(':')).join('  '));
+}
+
+// 12b) 零分时 beat 完全由时间地板决定
+//
+// 这条和上一条是一对：上一条守"分数曲线单调"，这一条守"时间地板真的存在"。
+// 少了它，一个从不消球的玩家会永远停在 2.20 秒一颗——局内毫无推进。
+{
+  const g = new Game(44, 'standard');
+  g.time = CFG.rampSec;
+  g.score = 0;
+  g.step(1 / 120);
+  ok(Math.abs(g.beat - CFG.beatEnd) < 1e-6,
+    `零分时 beat 由时间地板决定（${g.beat.toFixed(3)} = beatEnd ${CFG.beatEnd}）`);
+}
+
+// 13) 同一时刻，分数越高 beat 越短（曲线真的由分数驱动，而不是只由时间驱动）
+{
+  const mk = (score) => {
+    const g = new Game(42, 'standard');
+    g.time = 20;            // 固定时间，排除时间地板的干扰
+    g.score = score;
+    g.step(1 / 120);
+    return g;
+  };
+  const lo = mk(0), hi = mk(CFG.tempoRef * 0.5), top = mk(CFG.tempoRef);
+  ok(hi.beat < lo.beat - 1e-6, `同一时刻，得分高者 beat 更短（${lo.beat.toFixed(2)} → ${hi.beat.toFixed(2)}）`);
+  ok(top.beat <= CFG.beatRush + 1e-9, `满 tempoRef 时 beat 触底（${top.beat.toFixed(3)}）`);
+  ok(top.tempoMult > lo.tempoMult + 0.2, `节奏倍率随 tempo 上升（×${lo.tempoMult.toFixed(2)} → ×${top.tempoMult.toFixed(2)}）`);
+  ok(Math.abs(top.tempoMult - (1 + CFG.tempoGain)) < 1e-9, `满速倍率 = 1 + tempoGain（${top.tempoMult.toFixed(2)}）`);
+}
+
+// 14) 飞行永远装得进一拍里：空中有且只有一颗球
+//
+// 上一版靠 step 末尾的 max(beat, flight + fireGap) 夹逼，那是"事后补丁"；
+// 现在改成 flightDur = min(基准, beat × ratio)，这条不变量由几何保证。
+// 断言守的是那 14% 的空档：它一旦变成负数，球就会在落地前被下一颗覆盖掉。
+{
+  const g = new Game(43, 'standard');
+  let worst = Infinity, both = 0;
+  for (let f = 0; f < 120 * 90; f++) {
+    g.setInput(0);
+    g.step(1 / 120);
+    g.drainEvents();
+    worst = Math.min(worst, g.beat - g.flightDur);
+    both = Math.max(both, g.balls.length);
+    if (g.dead) break;
+  }
+  ok(worst >= CFG.fireGap - 1e-9, `每拍都留出 ≥ fireGap 的空档（最小 ${worst.toFixed(3)}s）`);
+  ok(both <= 1, `空中同时最多一颗球（${both}）`);
+}
+
 console.log(bad ? `\n失败 ${bad} 项` : '\n全部通过');
 process.exit(bad ? 1 : 0);

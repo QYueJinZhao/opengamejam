@@ -7,7 +7,9 @@
 // 3. 多射口**轮流开火**：一次只出一颗，口与口按 volleyIndex 轮转。
 //    上一版是"每拍齐射"，两颗球同时出膛——玩家一次要做两个落点决策，
 //    而两个落点相距 11 格，眼睛根本分不开。轮流之后，每一发都是独立事件。
-// 4. 新增跨节拍连击 RUSH：连续每拍都有消除才涨，断一拍就归零，是主要得分杠杆。
+// 4. 跨节拍连击：3 秒窗口内累计消除数，断了归零，是第一条得分杠杆；
+// 5. 节奏（第五轮）：beat 由分数驱动，机器越快每一消越值钱（tempoMult 1→1.45），
+//    这是第二条杠杆，也是唯一一条"玩家自己挣来、又必须自己扛"的压力。
 
 import { C, N, D, L, mod, configure } from './geom.js';
 import { getMode } from './modes.js';
@@ -91,15 +93,42 @@ export const BASE_CFG = {
   // 那就把第一轮做的形状编码废掉了。
   nozzleGap: 4.6,      // 炮口到轨道中心线的世界距离（render 的法向偏移用同一个值）
   flightSpeed: 3.5,    // 世界单位 / 秒 → 飞行 1.31s
-  // 上一颗落地到下一颗出膛的最小间隔。没有它，beat 一旦短于飞行时长，
-  // 新球会把还在空中的那颗直接覆盖掉（balls 被整组替换）。
+  // ---- 节奏（第五轮：从"时间驱动"改成"分数驱动"）----
+  //
+  // 上一版 beat 只是时间的函数：90 秒内从 2.20 匀速压到 1.45。
+  // 三个问题：
+  //   1. 曲线是匀速的，玩家感受不到"越打越快"，只感到"越来越卡"；
+  //   2. 与表现无关——打得好和打得烂走同一条曲线，节奏不携带任何信息；
+  //   3. 1.45 距离"飞行 1.31 + 间隔 0.08"的地板只剩 0.06 秒，
+  //      想再快也没有余量了（这是上一轮拉长飞行留下的债）。
+  //
+  // 现在 beat = min(时间地板, 分数曲线)：
+  //   时间地板 —— 保障局内一定有推进，跟表现无关，是"下限"；
+  //   分数曲线 —— 你打得越多，机器转得越快。这是**奖励**，不是惩罚：
+  //               加速意味着单位时间更多发球 = 更多分。
+  //
+  // 三条曲线合起来才是完整的收益结构：
+  //   分数↑ → beat↓ → 发球率↑ → 分数↑（正反馈，由 beatRush 截断）
+  //   且每一消再乘 tempoMult（1 → 1.45），所以"快"是**双重**加成。
+  // 为什么敢用正反馈：tempo 是个有界量（满速封顶），而且加速会把盘面压力
+  // 一起抬起来——玩家能撑住多快，就只能赚到多快。撑不住就爆仓，收益归零。
+  // 这就是"风险与收益成正比"：速度不是白送的，它是你自己挣来、也必须自己扛的。
+  beatStart: 2.20,     // 起手颗间隔
+  beatEnd: 1.55,       // 时间地板的终点（打到 90 秒也只有这么慢，保底推进）
+  beatRush: 1.02,      // 分数曲线的终点 = 满速时的颗间隔
+  rampSec: 55,         // 时间地板的爬升时长（短于 levelTime：地板要早点到位）
+  tempoRef: 10000,     // 分数曲线走满所需的分数（各模式按段位线覆写）
+  tempoGain: 0.45,     // 满速时每一消的额外倍率（1 + 0.45）
+  // 飞行占颗间隔的比例。上一版飞行是固定 1.31s，于是 beat 有一个
+  // "flight + fireGap" 的硬地板——想让节奏更快，只能先缩飞行。
+  // 现在反过来：飞行 = min(基准时长, 颗间隔 × ratio)，机器越快球飞得越快。
+  // 0.86 意味着任何速度下都留 14% 的"空档"给玩家看落点，
+  // 也让"落地 → 下一发出膛"永远是两个可以分辨的事件。
+  flightRatio: 0.86,
   fireGap: 0.08,
-  beatStart: 2.20,
-  beatEnd: 1.45,
-  rampSec: 90,
   levelTime: 90,
   startBeads: 8,
-  colorSteps: [[0, 4], [45, 5]],
+  colorSteps: [[0, 3], [38, 4]],
   stages: [[0, 1], [20, 2]],
 
   // ---- 特殊球 ----
@@ -174,7 +203,28 @@ export function comboTierIndex(n) {
   return t;
 }
 
-const BASE_SCORE = (n) => (n === 3 ? 300 : n === 4 ? 500 : 800 + 400 * Math.max(0, n - 5));
+/**
+ * 节奏档位：机器转速的里程碑。
+ *
+ * 为什么要播报：tempo 是这一版**唯一一个玩家自己挣来、又反噬自己**的量。
+ * 如果它只是 HUD 上一个缓慢变大的数字，玩家永远不会把它和"我打得快"联系起来，
+ * 也就不会去主动追它——那这条正反馈在体感上等于不存在。
+ *
+ * 三档就够：起速（能听出来）、过载（能看见颜色变了）、红线（满速）。
+ * 再多会变成噪音——它不像连消那样每次消除都跳。
+ */
+export const TEMPO_MARKS = [
+  { at: 0.34, name: '提速', color: '#5AC8FA' },
+  { at: 0.68, name: '过载', color: '#FFB03A' },
+  { at: 0.999, name: '红线', color: '#FF5C8A' },
+];
+
+/** tempo(0..1) → 每消倍率。渲染层与逻辑层共用，避免 HUD 与实际结算不一致。 */
+export function tempoMultOf(tempo, gain = 0.45) {
+  return 1 + gain * Math.max(0, Math.min(1, tempo));
+}
+
+const BASE_SCORE = (n) => (n === 3 ? 300 : n === 4 ? 700 : 1500 + 700 * Math.max(0, n - 5));
 const SWEEP_BONUS = 1500;
 // 爆破球的基础分。故意低于一次普通三消（300），因为它的价值在"止损"，
 // 不在"赚分"——否则最优解会变成一直等炸弹。
@@ -228,6 +278,11 @@ export class Game {
     configure(this.mode.geo);
     this.nozzleOff = buildNozzleOff(this.mode.layout);
     Object.assign(CFG, BASE_CFG, this.mode.cfg);
+    // tempoRef 必须由模式**显式**给出，不能从段位线推。
+    // 一开始偷懒让它等于 tiers[3]（S 线），结果段位线一重划，整条节奏曲线跟着变——
+    // 那是两个不该耦合的东西：段位线回答"这局值多少名"，tempoRef 回答"机器什么时候满速"。
+    // 现在每组模式都把 tempoRef 写成"好手在 2/3 局时能到的分数"，
+    // 于是满速总落在 65~75% 的进度上，跟段位线怎么划无关。
     this.seed = seed;
     this.reset();
   }
@@ -241,6 +296,16 @@ export class Game {
     this.time = 0;
     this.beatClock = 0;
     this.beat = CFG.beatStart;
+    // 节奏状态。tempo 是"现在这台机器有多快"的归一化读数（0 = 起手，1 = 满速），
+    // tempoMult 是它换算成的每消倍率。两者都在 step 里每帧重算，
+    // 渲染和音效直接读，不各自揣一份公式。
+    this.tempo = 0;
+    this.tempoMult = 1;
+    this.tempoMark = 0;
+    this.maxTempo = 0;
+    this.fastT = 0;          // 满速累计时长：结算页用它回答"这局机器跑起来了吗"
+
+    this.flightDur = CFG.nozzleGap / CFG.flightSpeed;
     this.balls = [];
 
     // 每个射口独立的三球队列：queues[i][0] 是待发球，[1][2] 是预览
@@ -432,15 +497,50 @@ export class Game {
     if (this.dead) return;
 
     this.time += dt;
-    const t = Math.min(1, this.time / CFG.rampSec);
-    // beat 现在的语义是"两颗球之间的间隔"，不是"一拍的时长"。
-    // 齐射取消后，球是一颗一颗出的，所以这个数直接就是发球节奏。
+
+    // ---- 节奏：时间地板 vs 分数曲线，取更快的那条 ----
     //
-    // 下限由飞行时长决定：一次只允许一颗球在空中。否则 balls 会被
-    // fire 整组替换，还在飞的那颗凭空消失（它连落地都没发生过）。
-    const flight = CFG.nozzleGap / CFG.flightSpeed;
-    const rawBeat = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * t;
-    this.beat = Math.max(rawBeat, flight + CFG.fireGap);
+    // 为什么是 min 而不是加权平均：两条曲线各自守着一种玩家。
+    // 打得差的玩家，分数曲线永远抬不动，只剩时间地板能把他推到 beatEnd，
+    // 所以他也能体验到"机器在加速"，只是上限低；打得好的玩家早就把
+    // 时间地板甩在后面，被自己的分数一路推到 beatRush。
+    // 用平均的话，两种玩家都会被拖到中间，谁都不满意。
+    const tRamp = Math.min(1, this.time / CFG.rampSec);
+    const beatTime = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * tRamp;
+
+    const prog = Math.min(1, this.score / Math.max(1, CFG.tempoRef));
+    // 0.85 次幂：前段抬得快一点。线性的话，前 20% 的分数只换来 20% 的加速，
+    // 而玩家在开局那一段最需要"我做的每件事都有反应"的即时回馈。
+    const beatScore = CFG.beatStart + (CFG.beatRush - CFG.beatStart) * Math.pow(prog, 0.85);
+
+    this.beat = Math.max(CFG.beatRush, Math.min(beatTime, beatScore));
+
+    // tempo 是"当前速度"的归一化，不是分数进度。分开的理由：
+    // 时间地板也在加速，如果 tempo 只看分数，一个从不消球的玩家
+    // 会看到机器越转越快、倍率却一直是 1.00——那是在骗他。
+    const span = Math.max(1e-6, CFG.beatStart - CFG.beatRush);
+    this.tempo = Math.max(0, Math.min(1, (CFG.beatStart - this.beat) / span));
+    this.tempoMult = tempoMultOf(this.tempo, CFG.tempoGain);
+    if (this.tempo > this.maxTempo) this.maxTempo = this.tempo;
+    if (this.tempo >= 0.995) this.fastT += dt;
+
+    // 飞行时长跟着颗间隔收紧。地板在这里是"拍内空档"（1 - ratio），
+    // 所以 beat 再也不需要 max(beat, flight + fireGap) 这种事后夹逼：
+    // 只要 flightRatio < 1，飞行永远装得进一拍里，空中最多一颗球的不变量
+    // 由几何保证，而不是靠一个容易忘掉的 clamp。
+    this.flightDur = Math.min(
+      CFG.nozzleGap / CFG.flightSpeed,
+      this.beat * CFG.flightRatio,
+    );
+
+    for (let i = this.tempoMark; i < TEMPO_MARKS.length; i++) {
+      if (this.tempo < TEMPO_MARKS[i].at) break;
+      this.tempoMark = i + 1;
+      this.events.push({
+        type: 'tempo', mark: i + 1, name: TEMPO_MARKS[i].name,
+        tempo: this.tempo, mult: this.tempoMult,
+      });
+    }
 
     const dir = this.input;
     if (dir !== 0) {
@@ -510,10 +610,10 @@ export class Game {
     this.queues[idx].shift();
     this.queues[idx].push(this.pickShot());
 
-    // 时长由**速度**推出来，不是写死的秒数。飞行距离现在是恒定的（炮口正下方），
-    // 但这条式子不假设它恒定：以后炮管拉长、或者改成斜射，只要 dist 变了，
-    // 时长自己跟着变，速度不用重调。
-    const dur = CFG.nozzleGap / CFG.flightSpeed;
+    // 时长在 step 里已经按当前节奏算好（flightDur）。这里不再从
+    // nozzleGap / flightSpeed 现推——满速时那两颗数会对不上，
+    // 因为飞行时长现在由"拍内占比"决定，不是由恒定速度决定。
+    const dur = this.flightDur;
 
     this.balls = [{ ci, off: this.nozzleOff[idx], idx, t: 0, dur }];
 
@@ -591,14 +691,14 @@ export class Game {
     }
 
     const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
-    const gain = Math.round((BOMB_BASE + BOMB_BASE * 0.6 * (len - 1) + rustHit * 260) * comboMult);
+    const gain = Math.round((BOMB_BASE + BOMB_BASE * 0.6 * (len - 1) + rustHit * 260) * comboMult * this.tempoMult);
     this.score += gain;
     this.clears++;
     this.bumpCombo(len);
 
     this.events.push({
       type: 'bomb', slot: c, off, hit: len, col: colors, positions,
-      gain, comboMult, s: mod(start + this.phase, N) * D, len,
+      gain, comboMult, tempoMult: this.tempoMult, s: mod(start + this.phase, N) * D, len,
       combo: this.combo,
     });
 
@@ -776,7 +876,10 @@ export class Game {
       const chainMult = CHAIN_MULT[Math.min(chain - 1, CHAIN_MULT.length - 1)];
       const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
       const base = BASE_SCORE(run.len) + rustN * 200;
-      const gain = Math.round(base * chainMult * comboMult);
+      // 节奏倍率：机器转得越快，同样一次消除越值钱。
+      // 这是"节奏越快分越高"的**显式**实现——上一版只有隐含的一层
+      // （beat 短 → 单位时间发球多），玩家完全读不出来。
+      const gain = Math.round(base * chainMult * comboMult * this.tempoMult);
       this.score += gain;
       this.clears++;
 
@@ -792,6 +895,7 @@ export class Game {
 
       this.events.push({
         type: 'clear', chain, gain, base, chainMult, comboMult, rustN,
+        tempoMult: this.tempoMult,
         // len 是"本次清掉多少颗"（含两侧被震碎的锈球），matchLen 是真正匹配到
         // 同色的长度。奖励球只认 matchLen：锈球是顺带震碎的，不是凑出来的。
         colors, positions, len, matchLen: run.len, off, s0,
@@ -812,11 +916,13 @@ export class Game {
       }
       if (reward) this.grantReward(reward);
 
-      // 清空跑道：给一次大额奖励，鼓励"敢把盘面打空"
+      // 清空跑道：给一次大额奖励，鼓励"敢把盘面打空"。
+      // 和消除一样吃节奏倍率——在满速下把 28 格清空，本来就比开局清空难得多。
       if (this.occupied() === 0) {
-        this.score += SWEEP_BONUS;
+        const bonus = Math.round(SWEEP_BONUS * this.tempoMult);
+        this.score += bonus;
         this.sweeps++;
-        this.events.push({ type: 'sweep', gain: SWEEP_BONUS, combo: this.combo });
+        this.events.push({ type: 'sweep', gain: bonus, combo: this.combo });
       }
     } else {
       this.chain = 0;

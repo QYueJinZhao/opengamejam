@@ -82,6 +82,30 @@ export class Sfx {
     this.intensity = Math.max(0, Math.min(1, x));
   }
 
+  /**
+   * 节奏 0..1 → BPM 96..142。
+   *
+   * 为什么改音乐而不是只加音效：节奏是"整台机器"的状态，不是某一次事件。
+   * 事件音（消除、连消）可以提示"刚刚发生了什么"，但玩家对"整体变快了"的感知
+   * 几乎完全来自音乐的拍速——这是听觉系统对周期性的敏感度决定的，
+   * 再多的音效也替代不了。
+   *
+   * 为什么不加音高：升 key 会让同一段旋律听起来"变了首歌"，
+   * 而改 BPM 只是"同一首歌唱得更急"。游戏里的加速要的是后者。
+   */
+  setTempo(x) {
+    const t = Math.max(0, Math.min(1, x || 0));
+    this.bpm = 96 + 46 * t;
+    this.stepDur = 60 / this.bpm / 2;
+  }
+
+  /** 节奏跨档：一个短促的上行二音，档位越高越高 */
+  tempoMark(mark = 1) {
+    const f = [523.25, 659.25, 880.0][Math.min(2, Math.max(0, mark - 1))];
+    this.tone({ freq: f, dur: 0.07, type: 'square', gain: 0.030 });
+    this.tone({ freq: f * 1.5, dur: 0.13, type: 'sine', gain: 0.045, at: 0.06 });
+  }
+
   tone({ freq = 440, to = null, dur = 0.12, type = 'sine', gain = 0.3, at = 0, bus = 'sfx' }) {
     if (!this.on) return;
     const t0 = this.ctx.currentTime + at;

@@ -6,7 +6,7 @@
 // 色相退成第二编码，所以高对比模式（V 键）只需要加强图底分离，不需要额外形符。
 
 import { C, R, L, N, D, pointAt, tangentAt, normalAt, mod } from './geom.js';
-import { PALETTE, CFG, comboMult, comboTierIndex, COMBO_TIERS, ballSkin, RUST, WILD, BOMB } from './sim.js';
+import { PALETTE, CFG, comboMult, comboTierIndex, COMBO_TIERS, TEMPO_MARKS, ballSkin, RUST, WILD, BOMB } from './sim.js';
 import { MODES, TIERS, scoreBand, tierProgress } from './modes.js';
 
 const VW = 1200, VH = 800;
@@ -693,8 +693,10 @@ export class Renderer {
   // 预测命中槽：按"现在松手"，球落地时炮口下会是哪个槽位。
   predSlots(game) {
     // 只在"即将发射 / 已经发射"时才预告：没有球在飞的时候，
-    // 松手预测要跨过整整一拍（1.3-2.2 秒、3 格以上），那已经不是玩家在做的决定了。
-    const imminent = game.beat - game.beatClock < 0.55;
+    // 松手预测要跨过整整一拍（1.0-2.2 秒、2 格以上），那已经不是玩家在做的决定了。
+    // 阈值按拍长取比例：固定 0.55s 在满速（拍长 1.02）时会变成"半个拍都在预告"，
+    // 在起手（拍长 2.2）时又几乎不出现。
+    const imminent = game.beat - game.beatClock < game.beat * 0.38;
     if (!game.balls.length && !imminent) return [];
     const coast = this.coastSlots(game);
     // 只预告真的会开火的那个口：轮流制下另一个口这一发不打，
@@ -731,9 +733,12 @@ export class Renderer {
   // 松手后 v 不是归零，而是衰减到 drift，所以位移要解析积分，不能拿 |v|×t 糊。
   // 幽灵球与珠链高亮共用这一个值，否则两处提示会互相打架。
   coastSlots(game) {
+    // flightDur 是"这一拍里的飞行时长"，随节奏收紧（见 sim 的 step）。
+    // 不能再用 nozzleGap / flightSpeed：满速时飞行只有 0.88s，
+    // 用固定 1.31s 算出来的落点会永远偏前 0.4 格——满速下那正好是"打空"和"命中"的差别。
     const T = game.balls.length
       ? game.flightLeft()
-      : (game.beat - game.beatClock) + CFG.nozzleGap / CFG.flightSpeed;
+      : (game.beat - game.beatClock) + game.flightDur;
     const k = CFG.dampK, drift = CFG.drift;
     return drift * T + (game.v - drift) * (1 - Math.exp(-k * T)) / k;
   }
@@ -1826,13 +1831,56 @@ export class Renderer {
     ctx.fillStyle = leftT < 15 ? '#FF6B7A' : '#5AC8FA';
     ctx.fillRect(44, 200, barW * (leftT / CFG.levelTime), 4);
 
-    // 节拍
+    // ---- 节奏 ----
+    // 上一版这里只有一行「BEAT 1.45s」。问题是：它是**结果**，不是**理由**。
+    // 玩家看到数字在变小，但不知道"变小"对他意味着什么，更不知道这跟他打得好不好有关。
+    // 现在这一块同时回答三件事：机器现在多快（倍率）、快到什么程度（条）、
+    // 以及这一发要等多久（秒）。倍率是这里唯一真正驱动决策的信息——
+    // 它直接出现在每一次消除的得分里。
+    const tempo = game.tempo || 0;
+    const tcol = tempo >= 0.999 ? TEMPO_MARKS[2].color
+      : tempo >= TEMPO_MARKS[1].at ? TEMPO_MARKS[1].color
+      : tempo >= TEMPO_MARKS[0].at ? TEMPO_MARKS[0].color
+      : 'rgba(140,190,255,0.55)';
+    ctx.textAlign = 'left';
     ctx.font = `600 11px ${FONT}`;
     ctx.fillStyle = ink(0.34);
-    ctx.fillText('BEAT', 44, 230);
-    ctx.font = `700 20px ${MONO}`;
-    ctx.fillStyle = ink(0.62);
-    ctx.fillText(game.beat.toFixed(2) + 's', 42, 254);
+    ctx.fillText('TEMPO', 44, 230);
+
+    const hot = tempo >= TEMPO_MARKS[1].at;
+    ctx.font = `700 22px ${MONO}`;
+    ctx.save();
+    if (hot) {
+      ctx.shadowColor = tcol;
+      ctx.shadowBlur = 8 + 6 * Math.sin(this.t * 5);
+    }
+    ctx.fillStyle = tcol;
+    ctx.globalAlpha = tempo >= 0.999 ? 0.82 + 0.18 * Math.sin(this.t * 7) : 1;
+    ctx.fillText(`×${(game.tempoMult || 1).toFixed(2)}`, 42, 258);
+    ctx.restore();
+
+    // 拍长放在右边：它是"这一发要等多久"，属于同一件事的另一面。
+    ctx.textAlign = 'right';
+    ctx.font = `600 12px ${MONO}`;
+    ctx.fillStyle = ink(0.30);
+    ctx.fillText(game.beat.toFixed(2) + 's', 240, 256);
+
+    // 条：起点是"起手"，右端是满速。两处刻度就是 TEMPO_MARKS 的前两档——
+    // 玩家不必记住 0.34 这种数字，他看到光点越过刻度时听到过那一声。
+    const tx = 44, ty = 268, tw = 196;
+    ctx.fillStyle = 'rgba(255,255,255,0.09)';
+    ctx.fillRect(tx, ty, tw, 3);
+    const tg = ctx.createLinearGradient(tx, 0, tx + tw, 0);
+    tg.addColorStop(0, 'rgba(90,200,250,0.85)');
+    tg.addColorStop(0.68, 'rgba(255,176,58,0.9)');
+    tg.addColorStop(1, 'rgba(255,92,138,0.95)');
+    ctx.fillStyle = tg;
+    ctx.fillRect(tx, ty, tw * tempo, 3);
+    for (const m of TEMPO_MARKS) {
+      const mx = tx + tw * Math.min(1, m.at);
+      ctx.fillStyle = tempo >= m.at ? m.color : 'rgba(255,255,255,0.16)';
+      ctx.fillRect(mx - 1, ty - 3, 2, 9);
+    }
 
     // 容量
     const occ = game.occupied();
@@ -2113,7 +2161,9 @@ export class Renderer {
       const stats = [
         `${m.geo.n} 格 · ${m.layout} 射口`,
         `${m.cfg.levelTime} 秒 · S 线 ${m.tiers[3]}`,
-        `节拍 ${m.cfg.beatStart.toFixed(1)}→${m.cfg.beatEnd.toFixed(1)}s`,
+        // 节拍写的是**满速**，不是时间地板的终点：玩家在这一局里真正会遇到的
+        // 最快节奏是 beatRush，把 1.55 写上去等于承诺一个永远不会兑现的慢。
+        `节拍 ${m.cfg.beatStart.toFixed(1)}→${m.cfg.beatRush.toFixed(1)}s`,
       ];
       ctx.font = `600 11px ${MONO}`;
       ctx.fillStyle = sel ? ink(0.44) : ink(0.26);
@@ -2230,8 +2280,11 @@ export class Renderer {
       `最长连锁 ${game.maxChain} 段　·　最高连消 ${game.maxCombo}　·　消除 ${game.clears} 次`,
       CX, 404
     );
+    // 满速占比：这一版唯一一个"你打得多快"的战绩读数。
+    // 它比"最高连消"更贴近这一局的实际手感——连消是爆发，满速是整局的奔跑状态。
+    const fastPct = Math.round(100 * (game.fastT || 0) / Math.max(1, game.time));
     ctx.fillText(
-      `落球 ${game.drops} 颗　·　吸附 ${game.snapped} 次　·　清空跑道 ${game.sweeps} 次`,
+      `落球 ${game.drops} 颗　·　满速 ${fastPct}%　·　清空跑道 ${game.sweeps} 次`,
       CX, 430
     );
 
