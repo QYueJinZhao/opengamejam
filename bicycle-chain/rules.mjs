@@ -1,5 +1,5 @@
 import { Game, CFG, WILD, BOMB, RUST, isColor, comboTierIndex } from './src/sim.js';
-import { N, mod } from './src/geom.js';
+import { N, D, mod } from './src/geom.js';
 import { botInput } from './src/bot.js';
 
 let bad = 0;
@@ -145,36 +145,77 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   ok(g.occupied() === 4, `4 颗相邻锈球不会被消掉（剩 ${g.occupied()}）`);
 }
 
-// 6) 珠子补位：恒定速度推进，不是"固定时间、按比例衰减"
+// 6) 珠子补位：两档速度
 //
-// 这一条守的是观感，不是数值。上一版用 dx *= exp(-26dt)，位移大的珠子初速极高、
-// 位移小的慢慢晃，但它们在**同一时刻**停下——一整列珠子同时归位。
-// 改成恒速后，dx 每秒固定减 dxSpeed 格：挪得远就滑得久。
+// 这一条守的是观感，不是数值。上一版是单一恒速 11 格/秒，问题出在
+// **落空吸附**：球垂直落到 k、链条在 target，相差 6 格时珠子 0.55 秒就走完，
+// 读起来不是"珠子走过去"，而是"珠子凭空出现在链条边上"。
+// 现在分两档：
+//   1 格（插入时整列让位）—— dxSpeed，必须快，慢了会读成"珠子堆住了"；
+//   2 格以上（落空补位）—— dxSlideSpeed，慢到眼睛能跟住。
 {
   const g = new Game(16, 'standard');
   g.slots.fill(null);
   g.slots[5] = g.makeBead(0);
 
-  g.slots[5].dx = 3.5;
-  g.step(1 / CFG.dxSpeed);                 // 一个"格时长"应该正好走掉 1 格
-  ok(Math.abs(g.slots[5].dx - 2.5) < 1e-9, `补位按固定速度推进（3.5 → ${g.slots[5].dx.toFixed(3)}）`);
+  // 推挤：正好 1 格，一个"格时长"走完
+  g.slots[5].dx = 1;
+  g.slots[5].dv = CFG.dxSpeed;
+  g.step(1 / CFG.dxSpeed);
+  ok(g.slots[5].dx === 0, `插入让位按 dxSpeed 一步归位（→ ${g.slots[5].dx.toFixed(3)}）`);
 
-  g.slots[5].dx = 0.4;
-  g.step(1 / CFG.dxSpeed);                 // 剩余不足一格：一次走完，不能越过 0
-  ok(g.slots[5].dx === 0, '不足一格时一次归位，不会越界成反向偏移');
+  // 补位：同样一段时间里只走一小截
+  g.slots[5].dx = 4;
+  g.slots[5].dv = CFG.dxSlideSpeed;
+  g.step(1 / CFG.dxSpeed);
+  ok(g.slots[5].dx > 3.5, `落空补位明显慢于插入让位（4 → ${g.slots[5].dx.toFixed(3)}）`);
 
-  // 位移越大耗时越久——这正是"指数衰减"做不到的
-  const timeToSettle = (dx) => {
+  // 不足一格：一次走完，不越界成反向
+  g.slots[5].dx = 0.03;                    // 小于一帧的位移（4.6/120 = 0.038 格）
+  g.step(1 / 120);
+  ok(g.slots[5].dx === 0 && g.slots[5].dv === 0, '不足一格时一次归位，并清掉速度');
+
+  // 越远越久，但全程不超过 dxSlideMaxSec
+  const settle = (dx) => {
     const h = new Game(16, 'standard');
     h.slots.fill(null);
     h.slots[5] = h.makeBead(0);
     h.slots[5].dx = dx;
+    h.slots[5].dv = Math.max(CFG.dxSlideSpeed, dx / CFG.dxSlideMaxSec);
     let t = 0;
     while (h.slots[5].dx !== 0 && t < 5) { h.step(1 / 120); t += 1 / 120; }
     return t;
   };
-  const t1 = timeToSettle(1), t4 = timeToSettle(4);
-  ok(t4 > t1 * 3.2, `挪 4 格比挪 1 格明显更久（${t1.toFixed(2)}s vs ${t4.toFixed(2)}s）`);
+  const t2 = settle(2), t6 = settle(6), t12 = settle(12);
+  ok(t6 > t2 * 1.8, `补位距离越远耗时越久（2 格 ${t2.toFixed(2)}s vs 6 格 ${t6.toFixed(2)}s）`);
+  ok(t12 <= CFG.dxSlideMaxSec + 0.1, `再远也不超过 dxSlideMaxSec（12 格 ${t12.toFixed(2)}s ≤ ${CFG.dxSlideMaxSec}s）`);
+}
+
+// 6b) 落球那一帧，珠子的**视觉位置**就在球落下的地方
+//
+// 落空吸附时珠子从落点滑向链条；如果起点没设对，它会直接出现在链条上——
+// 玩家看到"球落在空处，珠子凭空在几格外冒出来"，距离越远越像被甩过去。
+// 这条断言守的就是那一步：插入瞬间 slot+dx 必须等于 dropSlot。
+{
+  const g = new Game(53, 'standard');
+  let n = 0, worst = 0, far = 0;
+  for (let f = 0; f < 120 * 60; f++) {
+    g.setInput(botInput(g));
+    g.step(1 / 120);
+    for (const e of g.drainEvents()) {
+      if (e.type !== 'insert' && e.type !== 'lone') continue;
+      // e.s 是视觉位置（slot + dx + phase），落点也按同一套相位换算
+      const want = mod(e.dropSlot + g.phase, N) * D;
+      const d = Math.abs(e.s - want);
+      worst = Math.max(worst, Math.min(d, N * D - d));
+      const dd = Math.abs(mod(e.slot - e.dropSlot + N / 2, N) - N / 2);
+      if (dd > 3) far++;
+      n++;
+    }
+    if (g.dead) break;
+  }
+  ok(worst < 1e-9, `落球帧的视觉位置就在落点（${n} 次落球，最大偏差 ${worst.toExponential(1)}）`);
+  ok(far > 0, `确实有远距离吸附的样本（${far} 次，否则这条断言没验到东西）`);
 }
 
 // 7) 全流程不变式：跑一局，检查不变量

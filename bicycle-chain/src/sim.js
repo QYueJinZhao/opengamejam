@@ -165,7 +165,15 @@ export const BASE_CFG = {
   // 取 11：1 格 ≈ 0.09s（几乎无感），5 格 ≈ 0.45s（看得见滑过去）。
   // 取 7 试过，5 格要 0.71s——滑是滑了，但珠子会长时间叠在邻居身上，
   // 读起来像"珠子堆住了"而不是"珠子在追"。
-  dxSpeed: 11.0,       // 格 / 秒
+  dxSpeed: 11.0,       // 格 / 秒 —— 只管"被推开的这一刻让位"，必须快
+
+  // 落空补位是另一回事：球垂直落到 k，链条在 target，珠子要在视觉上
+  // 走过去。这里**不能**用 dxSpeed：差值 6 格时 0.55 秒就走完，
+  // 玩家看到的是珠子凭空出现在链条边上，只觉得"怎么突然就到了"。
+  // 4.6 格/秒 ≈ 珠径的 4.6 倍/秒，眼睛跟得住；dxSlideMaxSec 兜住极端情况
+  // （链条只剩两三颗时落点可能差 11 格），否则拖到 2.4 秒会和下一颗球打架。
+  dxSlideSpeed: 4.6,   // 格 / 秒 —— 落空吸附的滑行速度
+  dxSlideMaxSec: 1.5,  // 再远也不超过这个时长
 };
 
 export const CFG = { ...BASE_CFG };
@@ -376,7 +384,10 @@ export class Game {
   }
 
   makeBead(ci) {
-    return { id: beadSeq++, ci, dx: 0, pop: 0 };
+    // dv = 本次补位的收拢速度（格/秒）。必须**存在珠子上**而不是每帧现算：
+    // 现算的话 ad 越接近 0 速度越慢，退化成指数衰减、尾巴拖不完。
+    // 0 表示"没有在滑"，下次被推挤时按推挤档位重新赋值。
+    return { id: beadSeq++, ci, dx: 0, dv: 0 };
   }
 
   occupied() {
@@ -551,13 +562,18 @@ export class Game {
     this.v = Math.max(-CFG.vMax, Math.min(CFG.vMax, this.v));
     this.phase = mod(this.phase + this.v * dt, N);
 
-    // 补位：恒速收拢，不是指数衰减。
-    // 每颗珠子以 dxSpeed 格/秒往回滑，位移大就滑得久——所以一整列被推挤的珠子
-    // 会依次归位，后面那颗追着前面那颗，而不是"啪"一声全体同时落位。
-    const step = CFG.dxSpeed * dt;
+    // 补位：恒速收拢，不是指数衰减。速度值记在珠子自己身上（dv），
+    // 因为两种动作的速度差一个量级：
+    //   1 格（插入时整列让位）—— dxSpeed，必须快，慢了整列珠子会叠在邻居身上；
+    //   2 格以上（落空后吸附到链条）—— dxSlideSpeed，必须慢，
+    //     那是"珠子从落点走向链条"，用 11 格/秒走完 6 格只要 0.55 秒，等于瞬移。
     for (const b of this.slots) {
       if (!b || b.dx === 0) continue;
-      b.dx = b.dx > 0 ? Math.max(0, b.dx - step) : Math.min(0, b.dx + step);
+      const ad = Math.abs(b.dx);
+      const sp = b.dv || CFG.dxSpeed;
+      const s = sp * dt;
+      if (ad <= s) { b.dx = 0; b.dv = 0; }
+      else b.dx = b.dx > 0 ? b.dx - s : b.dx + s;
     }
     if (this.chain > 0 && this.time - this.chainT > 1.1) this.chain = 0;
     if (this.combo > 0 && this.time - this.comboT > COMBO_WINDOW) {
@@ -720,11 +736,25 @@ export class Game {
     if (ci0 === WILD) this.wilds++;
     const bead = this.makeBead(ci);
 
+    // 落空吸附：球是垂直落到 k 的，但珠子必须接在链条上（target）。
+    // 两者相差几格，珠子就得在视觉上真的**走**这几格——不补这段位移，
+    // 它会瞬间出现在离落点 6~11 格的地方。玩家看到的是"球落在空处，
+    // 珠子凭空在别处出现"，而距离越远，那一刻越像被加速甩过去。
+    // 机器人实测（标准局 357 次落球）：偏差 p90 = 6 格，最远 11 格，
+    // 非零的 183 次里有 41 次超过 4 格——都是链条很短、落点在空弧上的时候。
+    const drift = mod(target - k + N / 2, N) - N / 2;
+    bead.dx = -drift;
+    // 速度按距离取一次，记在珠子上（见 step 里的补位循环）。
+    // /dxSlideMaxSec 是兜底：链条只剩两三颗时落点可能差 11 格，
+    // 按 4.6 格/秒要拖 2.4 秒，会跟下一颗球同时在空中。
+    bead.dv = drift === 0 ? 0
+      : Math.max(CFG.dxSlideSpeed, Math.abs(drift) / CFG.dxSlideMaxSec);
+
     if (this.slots[target] === null) {
       this.slots[target] = bead;
       this.events.push({
-        type: 'lone', slot: target, ci, off,
-        s: mod(target + this.phase, N) * D,
+        type: 'lone', slot: target, ci, off, dropSlot: k,
+        s: mod(target + bead.dx + this.phase, N) * D,
         wild: ci0 === WILD,
       });
       this.resolve(target, off);
@@ -739,19 +769,29 @@ export class Game {
       for (let i = p; i >= 1; i--) {
         const dst = mod(target + i, N), src = mod(target + i - 1, N);
         this.slots[dst] = this.slots[src];
-        if (this.slots[dst]) this.slots[dst].dx -= 1;
+        if (this.slots[dst]) {
+          this.slots[dst].dx -= 1;
+          // 静止的珠子被推开 = 推挤档，要快；正在慢滑的（dv 非 0）保持原速，
+          // 否则它会在半路突然加速冲向链条。
+          if (!this.slots[dst].dv) this.slots[dst].dv = CFG.dxSpeed;
+        }
       }
     } else {
       for (let i = -q; i <= -1; i++) {
         const dst = mod(target + i, N), src = mod(target + i + 1, N);
         this.slots[dst] = this.slots[src];
-        if (this.slots[dst]) this.slots[dst].dx += 1;
+        if (this.slots[dst]) {
+          this.slots[dst].dx += 1;
+          if (!this.slots[dst].dv) this.slots[dst].dv = CFG.dxSpeed;
+        }
       }
     }
     this.slots[target] = bead;
     this.events.push({
       type: 'insert', slot: target, ci, off,
-      s: mod(target + this.phase, N) * D,
+      // 特效锚点用**视觉位置**（slot + dx），不是逻辑槽位：
+      // 落空吸附时珠子还在从落点滑过来的路上，火花画在 target 会脱节。
+      s: mod(target + bead.dx + this.phase, N) * D,
       snapped: wasEmpty && target !== k,
       dropSlot: k,
       wild: ci0 === WILD,
