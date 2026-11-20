@@ -1,11 +1,12 @@
 {
-  "name": "bicycle-chain-zuma",
+  "name": "bicycle-chain",
   "version": "0.3.1",
   "private": true,
   "type": "module",
-  "description": "Bicycle-Chain Reverse Zuma — 2D prototype (M2: 4 modes, combo, BGM)",
+  "description": "双轮彩球蛇 — 反向弹珠消除原型（M2：四模式、连消、BGM）",
   "scripts": {
     "dev": "node serve.mjs",
-    "test": "node test.mjs"
+    "test": "node test.mjs",
+    "check:brand": "node check-brand.mjs"
   }
 }

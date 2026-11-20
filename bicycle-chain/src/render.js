@@ -237,7 +237,7 @@ export class Renderer {
     ctx.fillText('B I C Y C L E   C H A I N', CX, CY - 8);
     ctx.font = `600 10px ${MONO}`;
     ctx.fillStyle = 'rgba(140,190,255,0.06)';
-    ctx.fillText('R E V E R S E   Z U M A', CX, CY + 12);
+    ctx.fillText('M A R B L E   S H O O T E R', CX, CY + 12);
     ctx.restore();
   }
 
@@ -1069,9 +1069,12 @@ export class Renderer {
     ctx.fillStyle = ink(0.96);
     ctx.fillText('双轮彩球蛇', CX, 132);
 
+    // 副标只用自有的英文名 + 通用品类词。原来这里还带着一个不属于本作的
+    // 品类商标，且字距是用空格拆开写的 —— 所以关键词检索搜不到它。
+    // 检查商标词时必须先去掉空白再匹配，见 DESIGN §23。
     ctx.font = `600 13px ${MONO}`;
     ctx.fillStyle = 'rgba(120,200,255,0.52)';
-    ctx.fillText('B I C Y C L E - C H A I N   R E V E R S E   Z U M A', CX, 166);
+    ctx.fillText('B I C Y C L E   C H A I N', CX, 166);
 
     ctx.font = `400 15px ${FONT}`;
     ctx.fillStyle = ink(0.50);
