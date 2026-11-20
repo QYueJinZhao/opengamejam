@@ -7,7 +7,7 @@
 // 3. 三射口模式「轮转两发」：每拍只有一个口休息，下拍换一个，压力仍是 2 球/拍；
 // 4. 新增跨节拍连击 RUSH：连续每拍都有消除才涨，断一拍就归零，是主要得分杠杆。
 
-import { N, D, L, mod, configure } from './geom.js';
+import { C, N, D, L, mod, configure } from './geom.js';
 import { getMode } from './modes.js';
 
 // ---- 球种：形状是第一编码，色相是第二编码 ----
@@ -143,16 +143,35 @@ function circDist(a, b, L) {
 
 let beadSeq = 1;
 
+/**
+ * 炮口槽位。
+ *
+ * 双炮刻意摆在**同一条直道**上，而不是上一版的 [0, N/2]（顶部 + 底部）。
+ * 上一版两座炮口对射：玩家既要理解"上面那个朝下打"，又要理解"下面那个朝上打"，
+ * 视线被劈成上下两半。同向后两座炮并排朝一个方向，这是直线射击游戏的默认直觉，
+ * 也让"转轮盘把目标送到炮口下"这一个动作就够了，不用在两个半场之间切换。
+ *
+ * k = floor(C/D) 是"这条直道最多能放几格"。取足它有两个作用：
+ * 一是两座炮都还在直道上（直道的法向是垂直的，炮身才是正着的）；
+ * 二是落点尽量拉开，缓解同向带来的"两个口打得太近"。
+ *
+ * 代价是真实的：落点间距从 N/2 格缩到 2k 格，段位线必须重测。
+ */
+function buildNozzleOff(layout) {
+  if (layout === 2) {
+    const k = Math.max(2, Math.floor(C / D));
+    return [N - k, k];
+  }
+  return Array.from({ length: layout }, (_, i) => Math.round((i * N) / layout));
+}
+
 export class Game {
   constructor(seed = 20261120, modeId = 'standard') {
     this.mode = getMode(modeId);
     this.modeId = this.mode.id;
     // 先改几何，再建盘面：N / D 是 live binding，后面所有代码读到的都是新值
     configure(this.mode.geo);
-    this.nozzleOff = Array.from(
-      { length: this.mode.layout },
-      (_, i) => Math.round((i * N) / this.mode.layout)
-    );
+    this.nozzleOff = buildNozzleOff(this.mode.layout);
     Object.assign(CFG, BASE_CFG, this.mode.cfg);
     this.seed = seed;
     this.reset();

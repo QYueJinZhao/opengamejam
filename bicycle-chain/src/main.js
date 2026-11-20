@@ -182,15 +182,15 @@ function handleEvents() {
         const p = arcToScreen(pad.s);
         shock(p.x, p.y, 5, 34, 0.5, 'rgba(255,214,90,ALPHA)', 2);
       }
-      float('×2 换位', 600, 700, 15, 'rgba(255,214,90,0.85)');
+      float('×2 换位', 600, 656, 15, 'rgba(255,214,90,0.85)');
     } else if (e.type === 'combo') {
       if (!silent && (e.combo === 3 || e.combo === 6 || e.combo === 10)) {
         sfx.rushUp(e.combo);
-        float(`连消 ${e.combo}`, 600, 650, 20, '#9BE9FF');
+        float(`连消 ${e.combo}`, 600, 612, 20, '#9BE9FF');
       }
     } else if (e.type === 'combobreak') {
       if (!silent) sfx.rushBreak();
-      float('连消中断', 600, 650, 16, 'rgba(255,140,150,0.9)');
+      float('连消中断', 600, 612, 16, 'rgba(255,140,150,0.9)');
     } else if (e.type === 'sweep') {
       fx.flash = Math.min(0.55, fx.flash + 0.30);
       fx.shake = Math.min(34, fx.shake + 16);
@@ -218,7 +218,7 @@ function stepOnce() {
   const n = game.nozzleCount();
   if (n !== lastNozzles) {
     lastNozzles = n;
-    float(`${n} 号射口上线`, 600, 660, 22, '#2FE6C8');
+    float(`${n} 号射口上线`, 600, 656, 22, '#2FE6C8');
     if (!silent) sfx.clear(3, 1);
   }
 

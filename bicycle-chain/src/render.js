@@ -21,6 +21,7 @@ const ink = (a) => `rgba(228,236,250,${a})`;
 let S = 30;
 let BEAD_R = 15;
 let CHANNEL_W = 33;
+let NOZ_STAND = 3.2;      // 炮口离跑道中心线的距离（世界单位）
 let IMPACTS = [];
 let NOZZLES = [];
 let geoKey = '';
@@ -30,7 +31,12 @@ function syncGeo(game) {
   if (key === geoKey) return;
   geoKey = key;
 
-  S = Math.min(34, 250 / (R + 4.2));
+  // 三个约束取最小，别只用一个魔法数：
+  //   34    —— 再大珠子就顶到左右 HUD 的边距了
+  //   300/(R+3.2) —— 纵向预算：炮口中心 + 炮身长度不能吃掉顶部标题行
+  //   790/(2(C+R)) —— 横向预算：导轨外沿不能压到左右 HUD 栏
+  // 上一版只有一个 250/(R+4.2)，对标准轮是 30.5，把纵向空间白扔了 15%。
+  S = Math.min(34, 300 / (R + 3.2), 790 / (2 * (C + R)));
   BEAD_R = (D * S) / 2 * 0.94;
   CHANNEL_W = D * S * 1.06;
 
@@ -43,8 +49,8 @@ function syncGeo(game) {
     const tan = tangentAt(s);
     IMPACTS.push(p);
     NOZZLES.push({
-      x: p.x + nrm.x * 3.7,
-      y: p.y + nrm.y * 3.7,
+      x: p.x + nrm.x * NOZ_STAND,
+      y: p.y + nrm.y * NOZ_STAND,
       nx: nrm.x, ny: nrm.y,
       tx: tan.x, ty: tan.y,
       s,
@@ -122,6 +128,7 @@ export class Renderer {
     this.beams(fx);
     this.shocks(fx);
     this.particles(fx);
+    this.vignette();
     this.floats(fx);
     if (fx && fx.flash > 0.001) {
       this.ctx.fillStyle = `rgba(210,235,255,${Math.min(0.5, fx.flash)})`;
@@ -136,23 +143,44 @@ export class Renderer {
   // ---------- 背景 ----------
   background(game) {
     const ctx = this.ctx;
-    const g = ctx.createRadialGradient(CX, CY, 80, CX, CY, 640);
-    g.addColorStop(0, '#0C121C');
-    g.addColorStop(0.55, '#080C14');
-    g.addColorStop(1, '#04060A');
+
+    // 底：竖向渐变。上深下略亮，是因为"机器悬在暗房里，地面接住一点光"——
+    // 纯径向渐变会让画面中心亮、四周均匀变暗，看起来像一张贴图；
+    // 竖向渐变 + 下方光池才有"房间"的方向感。
+    const g = ctx.createLinearGradient(0, 0, 0, VH);
+    g.addColorStop(0, '#05070B');
+    g.addColorStop(0.42, '#080D15');
+    g.addColorStop(0.78, '#0A111B');
+    g.addColorStop(1, '#06090F');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, VW, VH);
 
-    ctx.save();
-    ctx.globalAlpha = 0.4;
-    ctx.strokeStyle = 'rgba(90,150,220,0.05)';
-    ctx.lineWidth = 1;
-    for (let i = 0; i < 3; i++) {
+    // 机器背后的冷光晕。它只负责把机器从背景里"托"出来，不能自己成形状，
+    // 所以用两个不同半径的低透明度椭圆叠，而不是一个边界清楚的圆。
+    const halo = ctx.createRadialGradient(CX, CY - 20, 40, CX, CY - 20, 520);
+    halo.addColorStop(0, 'rgba(38,96,170,0.20)');
+    halo.addColorStop(0.55, 'rgba(24,60,120,0.07)');
+    halo.addColorStop(1, 'rgba(10,24,50,0)');
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, VW, VH);
+
+    // 地面光池：机器自己往地面投的一点青蓝色反光。
+    // 没有它，整个盘子像贴在黑纸上的剪贴画；有了它，下沿才"落"在地上。
+    if (game) {
+      const bot = CY + R * S + 18;
+      ctx.save();
+      ctx.translate(CX, bot);
+      ctx.scale(1, 0.26);
+      const pool = ctx.createRadialGradient(0, 0, 20, 0, 0, (C + R) * S * 0.98);
+      pool.addColorStop(0, 'rgba(46,150,230,0.15)');
+      pool.addColorStop(0.48, 'rgba(28,90,150,0.055)');
+      pool.addColorStop(1, 'rgba(10,30,60,0)');
       ctx.beginPath();
-      ctx.arc(CX, CY, 200 + i * 70, 0, PI2);
-      ctx.stroke();
+      ctx.arc(0, 0, (C + R) * S * 0.98, 0, PI2);
+      ctx.fillStyle = pool;
+      ctx.fill();
+      ctx.restore();
     }
-    ctx.restore();
 
     if (game) {
       const occ = game.occupied();
@@ -166,6 +194,17 @@ export class Renderer {
         ctx.fillRect(0, 0, VW, VH);
       }
     }
+  }
+
+  /** 四边压暗。只压边，不压中心，否则会和上方光晕打架。 */
+  vignette() {
+    const ctx = this.ctx;
+    const g = ctx.createRadialGradient(CX, CY, 300, CX, CY, 760);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.62, 'rgba(0,0,0,0.16)');
+    g.addColorStop(1, 'rgba(0,0,0,0.62)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, VW, VH);
   }
 
   // ---------- 跑道 ----------
@@ -183,29 +222,50 @@ export class Renderer {
     this.plate();
     this.flywheels(game);
     this.groove();
+    this.core(game);
+    this.gantry(game);
     this.pads(game);
   }
 
-  /** 拉丝金属托盘。它比导轨宽一圈，是"整台机器"的底座，不是跑道本身。 */
+  /**
+   * 拉丝金属托盘。它比导轨宽一圈，是"整台机器"的底座，不是跑道本身。
+   *
+   * 上一版只有一个 0.12 的外圈描边，结果整台机器在暗底上读不出边界，
+   * 像贴纸。这一版把"厚度"拆成四笔：投影（在地面上）→ 外沿高光（受光的上沿）
+   * → 外沿暗边（背光的下沿）→ 一排螺栓。四笔都极薄，但它们一起回答了
+   * "这块板有多厚、它是不是个实物"。
+   */
   plate() {
     const ctx = this.ctx;
     const padOut = CHANNEL_W + 44;          // 相对导轨外沿再宽出的量
     const halfH = R * S + (CHANNEL_W + padOut) / 2;
 
+    // 1) 落影：投到地面上
     ctx.save();
-    ctx.shadowColor = 'rgba(30,130,220,0.30)';
-    ctx.shadowBlur = 56;
-    ctx.fillStyle = '#070B12';
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 46;
+    ctx.shadowOffsetY = 16;
+    ctx.fillStyle = '#03060B';
     this.stadiumPath(ctx, padOut);
     ctx.fill();
     ctx.restore();
 
+    // 2) 外发光：机器自己往四周散的一点冷光
+    ctx.save();
+    ctx.shadowColor = 'rgba(34,150,240,0.34)';
+    ctx.shadowBlur = 50;
+    ctx.fillStyle = '#060A12';
+    this.stadiumPath(ctx, padOut);
+    ctx.fill();
+    ctx.restore();
+
+    // 3) 板面：上表面比下沿亮一档，暗示它是被上方灯照着的
     const g = ctx.createLinearGradient(0, CY - halfH, 0, CY + halfH);
-    g.addColorStop(0, '#1D2836');
-    g.addColorStop(0.18, '#131C27');
-    g.addColorStop(0.56, '#0C121A');
-    g.addColorStop(0.86, '#151E2A');
-    g.addColorStop(1, '#090E15');
+    g.addColorStop(0, '#1F2A37');
+    g.addColorStop(0.14, '#131C27');
+    g.addColorStop(0.52, '#0A1018');
+    g.addColorStop(0.88, '#131C27');
+    g.addColorStop(1, '#080D14');
     ctx.fillStyle = g;
     this.stadiumPath(ctx, padOut);
     ctx.fill();
@@ -217,18 +277,195 @@ export class Renderer {
     // 产生摩尔纹，在暗部看成一圈一圈的脏渐变。
     for (let yy = CY - halfH - 40; yy < CY + halfH + 40; yy += 3) {
       const k = ((yy * 37) % 17) / 17;
-      ctx.fillStyle = `rgba(150,195,245,${(0.004 + k * 0.009).toFixed(4)})`;
+      ctx.fillStyle = `rgba(150,195,245,${(0.005 + k * 0.012).toFixed(4)})`;
       ctx.fillRect(CX - 470, yy, 940, 1);
     }
-    // 倒角：外沿一道亮、内沿一道暗，两笔就能把"板"读成"有厚度的板"
-    ctx.strokeStyle = 'rgba(160,210,255,0.12)';
+
+    // 倒角：外沿一道亮、内沿一道暗
+    ctx.strokeStyle = 'rgba(170,215,255,0.20)';
     ctx.lineWidth = 2;
-    this.stadiumPath(ctx, padOut - 4);
+    this.stadiumPath(ctx, padOut - 3);
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(0,0,0,0.60)';
-    ctx.lineWidth = 2;
-    this.stadiumPath(ctx, padOut - 18);
+    ctx.strokeStyle = 'rgba(0,0,0,0.72)';
+    ctx.lineWidth = 2.4;
+    this.stadiumPath(ctx, padOut - 15);
     ctx.stroke();
+
+    // 受光上沿：只画上半圈。整圈描亮会变成"发光的圈"，只有上沿亮才是"被照亮的边"
+    ctx.beginPath();
+    const hw = 2 * (C + R) * S + padOut;
+    const hh = 2 * R * S + padOut;
+    ctx.roundRect(CX - hw / 2 + 1, CY - hh / 2 + 1, hw - 2, hh / 2, hh / 2);
+    ctx.strokeStyle = 'rgba(190,230,255,0.15)';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.restore();
+
+    // 4) 螺栓：沿外沿等距。它们不是装饰——一排等距的点是"这块板是人装上去的"
+    //    最省字的一句话，也顺手把边框的曲率标出来了。
+    const dEdge = CHANNEL_W + 11;
+    for (let i = 0; i < 14; i++) {
+      const s = (i / 14) * L;
+      const p = pointAt(s);
+      const n = normalAt(s);
+      this.bolt(CX + (p.x + n.x * dEdge) * S, CY + (p.y + n.y * dEdge) * S, 3.1);
+    }
+  }
+
+  /** 一颗内六角螺栓：暗底 + 上沿高光 + 中间一个更暗的六边形。 */
+  bolt(x, y, r) {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, PI2);
+    const g = ctx.createLinearGradient(x, y - r, x, y + r);
+    g.addColorStop(0, '#4A5C74');
+    g.addColorStop(1, '#0C121B');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * PI2 + 0.5;
+      const px = x + Math.cos(a) * r * 0.52, py = y + Math.sin(a) * r * 0.52;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(4,8,14,0.72)';
+    ctx.fill();
+  }
+
+  /**
+   * 中心机芯：两只飞轮之间那块被空出来的地方。
+   *
+   * 上一版我在这里塞了一整块下沉面板，结果它读成一块显示器——因为"暗底 +
+   * 内发光的横条"就是屏幕的语汇。机器的心不是屏幕，是**一根轴**：
+   * 一根把两个飞轮连起来的传动轴 + 中间一个会随节拍胀缩的轴承。
+   * 细、暗、有结构，才不会被误读成 UI。
+   */
+  core(game) {
+    const ctx = this.ctx;
+    const beat = game ? Math.min(1, game.beatClock / game.beat) : 0;
+    const gearR = R * S * 0.66;
+    const xL = CX - (C * S - gearR * 0.92);
+    const xR = CX + (C * S - gearR * 0.92);
+    const h = Math.max(13, R * S * 0.15);
+
+    ctx.save();
+    // 传动轴
+    ctx.beginPath();
+    ctx.roundRect(xL, CY - h / 2, xR - xL, h, h / 2);
+    const g = ctx.createLinearGradient(0, CY - h / 2, 0, CY + h / 2);
+    g.addColorStop(0, '#33435A');
+    g.addColorStop(0.4, '#151E2A');
+    g.addColorStop(1, '#070C13');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // 轴上沿一道冷光：说明它是磨过的金属，不是一根黑棍
+    ctx.beginPath();
+    ctx.moveTo(xL + h, CY - h / 2 + 1);
+    ctx.lineTo(xR - h, CY - h / 2 + 1);
+    ctx.strokeStyle = 'rgba(170,215,255,0.18)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // 轴承
+    const br = Math.max(15, R * S * 0.27);
+    ctx.beginPath();
+    ctx.arc(CX, CY, br, 0, PI2);
+    const bg = ctx.createRadialGradient(CX - br * 0.3, CY - br * 0.35, 2, CX, CY, br);
+    bg.addColorStop(0, '#3E5169');
+    bg.addColorStop(1, '#0A1019');
+    ctx.fillStyle = bg;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // 节拍环：一圈随拍子向外扩的冷光。全场只有它从中心往外走，
+    // 玩家不用看炮口的蓄力条也能感到"下一发快到了"。
+    ctx.beginPath();
+    ctx.arc(CX, CY, br + 4 + beat * 9, 0, PI2);
+    ctx.strokeStyle = `rgba(96,224,255,${(0.06 + 0.30 * (1 - beat)).toFixed(3)})`;
+    ctx.lineWidth = 1.6;
+    ctx.shadowColor = 'rgba(80,200,255,0.6)';
+    ctx.shadowBlur = 8;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // 轴承中心：一个小六角螺栓，和托盘边缘那排是同一套零件
+    this.bolt(CX, CY, Math.max(4, br * 0.34));
+    ctx.restore();
+  }
+
+  /**
+   * 双炮挂架。两座炮并排朝同一个方向之后，它们必须看起来是**同一台机器上**
+   * 的两个炮管，而不是两个各自为战的炮台。
+   *
+   * 这里试了三稿，前两稿都是"把两门炮连起来"，都失败了：
+   *   细横梁   → 一副哑铃，两头各挂一个头；
+   *   宽机匣   → 一块 400px 的空板，两头挂两个头，中间空得像窗台板；
+   *   下垂软管 → 一根电线横跨一片空地，中间的指示灯读成"线上挂了颗珠子"。
+   * 结论是**不要连**。两门炮各装各的挂板，同向这件事由"两门炮长得一模一样、
+   * 姿态一模一样"来表达就够了——一件东西重复两次，本身就是一组。
+   */
+  gantry(game) {
+    if (!game || game.nozzleOff.length !== 2) return;
+    const a = this.toScreen(NOZZLES[0]);
+    const b = this.toScreen(NOZZLES[1]);
+    if (Math.abs(a.y - b.y) > 8) return;   // 不在同一条直道上就不画
+
+    const ctx = this.ctx;
+    const pw = 64, ph = 50;
+    const cy = a.y - 61;
+
+    ctx.save();
+    for (const p of [a, b]) {
+      // 挂板：上宽下窄的梯形，底边收进去，读起来是"吊着的"而不是"立着的"
+      const inset = 7;
+      ctx.beginPath();
+      ctx.moveTo(p.x - pw / 2, cy - ph / 2);
+      ctx.lineTo(p.x + pw / 2, cy - ph / 2);
+      ctx.lineTo(p.x + pw / 2 - inset, cy + ph / 2);
+      ctx.lineTo(p.x - pw / 2 + inset, cy + ph / 2);
+      ctx.closePath();
+      const g = ctx.createLinearGradient(0, cy - ph / 2, 0, cy + ph / 2);
+      g.addColorStop(0, '#3A4A5F');
+      g.addColorStop(0.36, '#1E2937');
+      g.addColorStop(1, '#070C13');
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      // 上沿受光 + 下沿冷光（炮管从这里出去）
+      ctx.beginPath();
+      ctx.moveTo(p.x - pw / 2 + 3, cy - ph / 2 + 1.2);
+      ctx.lineTo(p.x + pw / 2 - 3, cy - ph / 2 + 1.2);
+      ctx.strokeStyle = 'rgba(195,230,255,0.32)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(p.x - pw / 2 + inset + 3, cy + ph / 2 - 0.6);
+      ctx.lineTo(p.x + pw / 2 - inset - 3, cy + ph / 2 - 0.6);
+      ctx.strokeStyle = 'rgba(70,190,255,0.28)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      // 四角螺栓
+      this.bolt(p.x - pw / 2 + 9, cy - ph / 2 + 9, 2.6);
+      this.bolt(p.x + pw / 2 - 9, cy - ph / 2 + 9, 2.6);
+      this.bolt(p.x - pw / 2 + 12, cy + ph / 2 - 9, 2.6);
+      this.bolt(p.x + pw / 2 - 12, cy + ph / 2 - 9, 2.6);
+    }
+
     ctx.restore();
   }
 
@@ -254,9 +491,16 @@ export class Renderer {
     ctx.save();
     ctx.translate(cx, cy);
 
-    // 齿盘：每颗齿是一个梯形，底边落在 r0 上
+    // 底盘暗坑：让齿轮"陷"进托盘，而不是浮在上面
+    ctx.beginPath();
+    ctx.arc(0, 0, r1 * 1.10, 0, PI2);
+    ctx.fillStyle = 'rgba(3,6,11,0.75)';
+    ctx.fill();
+
     ctx.save();
     ctx.rotate(rot);
+
+    // 齿盘：每颗齿是一个梯形，底边落在 r0 上
     ctx.beginPath();
     let first = true;
     for (let i = 0; i < teeth; i++) {
@@ -268,33 +512,56 @@ export class Renderer {
       }
     }
     ctx.closePath();
-    const mg = ctx.createLinearGradient(-r, -r, r, r);
-    mg.addColorStop(0, '#3B4A5F');
-    mg.addColorStop(0.42, '#222D3C');
-    mg.addColorStop(1, '#0D1420');
+    const mg = ctx.createLinearGradient(-r * 0.7, -r, r * 0.7, r);
+    mg.addColorStop(0, '#46586F');
+    mg.addColorStop(0.44, '#24303F');
+    mg.addColorStop(1, '#0A1018');
     ctx.fillStyle = mg;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(150,200,255,0.20)';
+
+    // 齿顶受光：只描上半圈，整圈描亮会读成"发光的圈"
+    ctx.beginPath();
+    ctx.arc(0, 0, r1 * 0.97, Math.PI * 1.08, Math.PI * 1.92);
+    ctx.strokeStyle = 'rgba(180,215,255,0.30)';
+    ctx.lineWidth = Math.max(1, r * 0.035);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, r0 * 0.99, 0, PI2);
+    ctx.strokeStyle = 'rgba(150,200,255,0.16)';
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // 辐条 + 轮毂
-    ctx.strokeStyle = 'rgba(10,15,22,0.85)';
-    ctx.lineWidth = r * 0.15;
+    // 五条辐条槽：上一版画的是五根深色**线**，远看是五个黑条，齿轮读成甜甜圈。
+    // 改成"挖空"——槽内比盘面更暗，槽的上沿给一道亮边，这样才像镂空而不是涂黑。
     for (let i = 0; i < 5; i++) {
       const a = (i / 5) * PI2;
+      ctx.save();
+      ctx.rotate(a);
+      const x0 = r * 0.30, x1 = r0 * 0.86, w = r * 0.115;
       ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * r * 0.20, Math.sin(a) * r * 0.20);
-      ctx.lineTo(Math.cos(a) * r0 * 0.84, Math.sin(a) * r0 * 0.84);
+      ctx.roundRect(x0, -w, x1 - x0, w * 2, w);
+      ctx.fillStyle = 'rgba(4,7,12,0.92)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x0, -w + 1);
+      ctx.lineTo(x1 - w, -w + 1);
+      ctx.strokeStyle = 'rgba(160,205,255,0.22)';
+      ctx.lineWidth = 1;
       ctx.stroke();
+      ctx.restore();
     }
+
+    // 轮毂
     ctx.beginPath();
     ctx.arc(0, 0, r * 0.30, 0, PI2);
     const hg = ctx.createRadialGradient(-r * 0.08, -r * 0.09, 1, 0, 0, r * 0.30);
-    hg.addColorStop(0, '#4A5A70');
-    hg.addColorStop(1, '#141C28');
+    hg.addColorStop(0, '#5A6C84');
+    hg.addColorStop(1, '#101822');
     ctx.fillStyle = hg;
     ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
 
     // 蓝光灯环：拆解图里最醒目的一笔，也是唯一的高饱和元素
     ctx.beginPath();
@@ -304,6 +571,17 @@ export class Renderer {
     ctx.shadowColor = 'rgba(70,190,255,0.9)';
     ctx.shadowBlur = 14;
     ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // 相位标记：16 颗齿是旋转对称的，转一格和没转一模一样——齿轮的转动
+    // 在上一版里根本看不见。加一颗偏心琥珀点，转多少一眼就能读出来。
+    const ia = r0 * 0.72;
+    ctx.beginPath();
+    ctx.arc(0, -ia, Math.max(2, r * 0.05), 0, PI2);
+    ctx.fillStyle = 'rgba(255,196,90,0.85)';
+    ctx.shadowColor = 'rgba(255,180,60,0.9)';
+    ctx.shadowBlur = 8;
+    ctx.fill();
     ctx.restore();
 
     ctx.restore();
@@ -319,34 +597,39 @@ export class Renderer {
     const edge = (d) => this.stadiumPath(ctx, 2 * d);
 
     // 槽底
-    ctx.strokeStyle = '#05090F';
+    ctx.strokeStyle = '#04070C';
     ctx.lineWidth = CHANNEL_W;
     edge(0);
     ctx.stroke();
 
+    // 槽壁。上下两半给不同的亮度——光从上来，所以上半圈的内壁该亮、
+    // 下半圈该暗。这在闭合环上是个便宜的近似，但读起来就是"有深度"。
     const wall = ctx.createLinearGradient(0, CY - R * S - CHANNEL_W, 0, CY + R * S + CHANNEL_W);
-    wall.addColorStop(0, '#2A3B52');
-    wall.addColorStop(0.5, '#16222F');
-    wall.addColorStop(1, '#22334A');
+    wall.addColorStop(0, '#3C516B');
+    wall.addColorStop(0.22, '#22303F');
+    wall.addColorStop(0.5, '#0E1824');
+    wall.addColorStop(0.78, '#1D2A3A');
+    wall.addColorStop(1, '#33455C');
     ctx.strokeStyle = wall;
     ctx.lineWidth = CHANNEL_W;
     edge(0);
     ctx.stroke();
 
-    // 中间压暗，形成"两条平行轨"的错觉
-    ctx.strokeStyle = 'rgba(4,8,14,0.82)';
-    ctx.lineWidth = CHANNEL_W * 0.50;
+    // 中间压暗：形成"两条平行轨"的错觉
+    ctx.strokeStyle = 'rgba(3,6,11,0.86)';
+    ctx.lineWidth = CHANNEL_W * 0.52;
     edge(0);
     ctx.stroke();
 
     for (const k of [1, -1]) {
-      ctx.strokeStyle = 'rgba(150,200,255,0.20)';
-      ctx.lineWidth = 2;
-      edge(k * CHANNEL_W * 0.42);
+      // 轨脊：先暗后亮，暗在下、亮在上，才有"脊"的厚度
+      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+      ctx.lineWidth = 3.2;
+      edge(k * (CHANNEL_W * 0.42 + 2));
       ctx.stroke();
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.lineWidth = 1.4;
-      edge(k * (CHANNEL_W * 0.42 + 2.6));
+      ctx.strokeStyle = 'rgba(160,205,255,0.26)';
+      ctx.lineWidth = 1.6;
+      edge(k * CHANNEL_W * 0.42);
       ctx.stroke();
     }
 
@@ -388,36 +671,49 @@ export class Renderer {
       }
 
       ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(outer[0][0], outer[0][1]);
-      for (const q of outer) ctx.lineTo(q[0], q[1]);
-      for (let k = inner.length - 1; k >= 0; k--) ctx.lineTo(inner[k][0], inner[k][1]);
-      ctx.closePath();
-      ctx.fillStyle = `rgba(255,196,60,${(0.08 + 0.07 * pulse).toFixed(3)})`;
-      ctx.fill();
-      ctx.shadowColor = 'rgba(255,200,70,0.8)';
-      ctx.shadowBlur = 12;
-      ctx.strokeStyle = `rgba(255,214,90,${(0.42 + 0.30 * pulse).toFixed(3)})`;
-      ctx.lineWidth = 1.6;
-      ctx.stroke();
-      // 中心虚线：有它这条带子才读成"一段有起点终点的判定区"，
-      // 而不是"轨道被刷成了金色"。填色已经压得很薄，识别全靠这根线。
-      ctx.shadowBlur = 0;
-      ctx.beginPath();
-      for (let k = 0; k <= steps; k++) {
-        const s = pad.s - half + 2 * half * (k / steps);
-        const q = this.toScreen(pointAt(s));
-        const n = normalAt(s);
-        // 画在外沿而不是中心线：中心线会被珠子完全盖住，等于没画
-        const qx = q.x + n.x * halfW, qy = q.y + n.y * halfW;
-        if (k === 0) ctx.moveTo(qx, qy);
-        else ctx.lineTo(qx, qy);
+      // 1) 光带。这一处改了四稿，每次都是"多画一点就变成另一个东西"：
+      //    平涂暖色 → 轨道里多了一块边界分明的褐色补丁
+      //    平涂 + 暗底 → 一根实心芥末条，把珠子全压住
+      //    三道递减线 → 没有珠子盖着的地方露出两三根平行的金线，像布了线
+      //    最后只留**外沿一道**：贴着槽壁、珠子压不到，长度即判定范围，
+      //    两端再加短封头。判定区该只被读成"这一段边上亮着"，不该是任何面。
+      //    取 0.478 是因为珠子半径是 0.443 倍槽宽——再往里就被珠子吃掉了。
+      const bands = [[0.478, 3.0, 0.46]];
+      for (let bi = 0; bi < bands.length; bi++) {
+        const [d, w, a] = bands[bi];
+        ctx.beginPath();
+        for (let k = 0; k <= steps; k++) {
+          const s = pad.s - half + 2 * half * (k / steps);
+          const q = this.toScreen(pointAt(s));
+          const n = normalAt(s);
+          const qx = q.x + n.x * CHANNEL_W * d, qy = q.y + n.y * CHANNEL_W * d;
+          if (k === 0) ctx.moveTo(qx, qy); else ctx.lineTo(qx, qy);
+        }
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = `rgba(255,206,80,${(a * (0.78 + 0.42 * pulse)).toFixed(3)})`;
+        ctx.lineWidth = w;
+        if (bi === 0) {
+          ctx.shadowColor = 'rgba(255,196,60,0.85)';
+          ctx.shadowBlur = 12;
+        }
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.lineCap = 'butt';
       }
-      ctx.setLineDash([5, 6]);
-      ctx.strokeStyle = `rgba(255,226,140,${(0.34 + 0.26 * pulse).toFixed(3)})`;
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-      ctx.setLineDash([]);
+
+      // 2) 两端封头：判定区必须有明确的起止，否则"差半格算不算"只能靠猜。
+      //    只画外沿往内的前 60%——画满整条槽会读成两堵挡在跑道上的墙。
+      for (const e of [0, steps]) {
+        const se = pad.s - half + 2 * half * (e / steps);
+        const q = this.toScreen(pointAt(se));
+        const n = normalAt(se);
+        ctx.beginPath();
+        ctx.moveTo(q.x + n.x * halfW * 1.06, q.y + n.y * halfW * 1.06);
+        ctx.lineTo(q.x + n.x * halfW * 0.62, q.y + n.y * halfW * 0.62);
+        ctx.strokeStyle = `rgba(255,226,140,${(0.34 + 0.26 * pulse).toFixed(3)})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
       ctx.restore();
 
       // ×2 标签压在外侧，避开珠子
@@ -543,9 +839,20 @@ export class Renderer {
     // 锈球不发光。盘面上所有会发光的东西都是"可消资源"，不发光本身就是
     // 一条视觉规则——它比在石头表面写个"不可消"的符号更早被眼睛接收到。
     const glow = b.ci !== RUST;
+    const ctx = this.ctx;
+
+    // 落影。上一版的珠子没有影子，于是整条链读起来像"贴在跑道平面上的贴纸"。
+    // 影子压在珠子正下方一小块，只有下沿露出来，眼睛接收到的信息是
+    // "它比槽底高、但陷在槽里"。同一颗珠子旁边的同色珠子也靠它分开。
+    const sg = ctx.createRadialGradient(p.x, p.y + r * 0.26, r * 0.15, p.x, p.y + r * 0.26, r * 1.05);
+    sg.addColorStop(0, 'rgba(0,0,0,0.58)');
+    sg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = sg;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y + r * 0.26, r * 0.94, r * 0.70, 0, 0, PI2);
+    ctx.fill();
 
     if (near > 0.02 && glow) {
-      const ctx = this.ctx;
       const c = ballSkin(b.ci);
       ctx.save();
       ctx.globalAlpha = near * 0.9;
@@ -561,7 +868,6 @@ export class Renderer {
 
     this.ballBody(p.x, p.y, r, b.ci, cb);
     if (near > 0.02) {
-      const ctx = this.ctx;
       ctx.beginPath();
       ctx.arc(p.x, p.y, r + 3.5, 0, PI2);
       ctx.strokeStyle = `rgba(255,255,255,${0.25 + near * 0.6})`;
@@ -659,33 +965,41 @@ export class Renderer {
     ctx.fill();
     ctx.restore();
 
-    // 外环受光：上方压白、下方压黑
+    // 外环受光。上一版上方压了 0.55 的纯白，结果整个方核读成"上面米色、
+    // 下面金色"的按钮——白得太实就不像受光的金属，像涂的漆。
+    // 现在是琥珀色的光而不是白光：同色相提亮才读成"同一块料被照亮"。
     const g = ctx.createLinearGradient(x, y - a, x, y + a);
-    g.addColorStop(0, 'rgba(255,255,255,0.55)');
-    g.addColorStop(0.42, 'rgba(255,255,255,0.05)');
-    g.addColorStop(1, 'rgba(0,0,0,0.34)');
+    g.addColorStop(0, 'rgba(255,246,214,0.32)');
+    g.addColorStop(0.30, 'rgba(255,224,150,0.08)');
+    g.addColorStop(1, 'rgba(26,12,0,0.48)');
     ctx.fillStyle = g;
     ctx.fill();
 
-    // 下沉内面
+    // 下沉内面：琥珀玻璃，中心透出一点暖芯
     const ia = a * 0.60;
     ctx.beginPath();
     ctx.roundRect(x - ia, y - ia, ia * 2, ia * 2, rad * 0.55);
     const ig = ctx.createLinearGradient(x, y - ia, x, y + ia);
-    ig.addColorStop(0, 'rgba(0,0,0,0.30)');
-    ig.addColorStop(1, 'rgba(255,255,255,0.16)');
+    ig.addColorStop(0, 'rgba(0,0,0,0.34)');
+    ig.addColorStop(1, 'rgba(255,214,130,0.20)');
     ctx.fillStyle = ig;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.26)';
     ctx.lineWidth = 1;
     ctx.stroke();
+
+    const core = ctx.createRadialGradient(x, y, 0, x, y, ia * 1.25);
+    core.addColorStop(0, 'rgba(255,236,168,0.34)');
+    core.addColorStop(1, 'rgba(255,200,90,0)');
+    ctx.fillStyle = core;
+    ctx.fill();
 
     // 倒角高光：只画左上两条边，多了就不像金属
     ctx.beginPath();
     ctx.moveTo(x - a + rad * 0.5, y - a + 1.6);
     ctx.lineTo(x + a - rad, y - a + 1.6);
-    ctx.strokeStyle = 'rgba(255,255,255,0.72)';
-    ctx.lineWidth = Math.max(1, r * 0.07);
+    ctx.strokeStyle = 'rgba(255,255,255,0.56)';
+    ctx.lineWidth = Math.max(1, r * 0.06);
     ctx.lineCap = 'round';
     ctx.stroke();
     ctx.lineCap = 'butt';
@@ -1025,7 +1339,9 @@ export class Renderer {
       const e = 0.5 * u + 0.5 * sm;
       // 弧线沿切线方向（垂直于出膛方向）。早先沿外法向鼓，正好顶在前进方向的反面，
       // 球看起来像"卡在炮口没动"。
-      const arc = Math.sin(Math.PI * Math.min(1, u)) * 0.46;   // 世界单位
+      // 左右半边镜像：双炮并排时两发球朝各自的外侧绕，中门架不会被轨迹切穿。
+      const side = from.x < -0.001 ? -1 : 1;
+      const arc = Math.sin(Math.PI * Math.min(1, u)) * 0.46 * side;   // 世界单位
       return this.toScreen({
         x: from.x + (to.x - from.x) * e + from.tx * arc,
         y: from.y + (to.y - from.y) * e + from.ty * arc,
@@ -1233,16 +1549,19 @@ export class Renderer {
     this.ballBody(p.x - nz.nx * 7, p.y - nz.ny * 7, 13, game.queues[idx][0], ui.cb);
     ctx.restore();
 
-    // 预览队列：沿切线排开，越小越远
+    // 预览队列：沿切线排开，越小越远。
+    // 方向按炮口所在的左右半边镜像：双炮并排时，两条队列朝各自的外侧展开，
+    // 中间的门架才不会被队列穿过；否则左炮的队列会横着怼进右炮身上。
     const q = game.queues[idx];
+    const side = nz.x < -0.001 ? -1 : 1;
     for (let k = 1; k < q.length; k++) {
-      const d = 38 + (k - 1) * 30;
-      const px = p.x + nz.tx * d + nz.nx * 8;
-      const py = p.y + nz.ty * d + nz.ny * 8;
+      const d = 50 + (k - 1) * 30;
+      const px = p.x + nz.tx * d * side + nz.nx * 8;
+      const py = p.y + nz.ty * d * side + nz.ny * 8;
       ctx.save();
       ctx.globalAlpha = (k === 1 ? 0.85 : 0.5) * dim;
       ctx.beginPath();
-      ctx.moveTo(p.x + nz.tx * 26 + nz.nx * 8, p.y + nz.ty * 26 + nz.ny * 8);
+      ctx.moveTo(p.x + nz.tx * 26 * side + nz.nx * 8, p.y + nz.ty * 26 * side + nz.ny * 8);
       ctx.lineTo(px, py);
       ctx.strokeStyle = 'rgba(150,200,255,0.20)';
       ctx.lineWidth = 1.2;
@@ -1367,9 +1686,22 @@ export class Renderer {
     // 不加暗底会出现"看得见轮廓但读不出数字"的情况。
     ctx.shadowColor = 'rgba(0,0,0,0.85)';
     ctx.shadowBlur = 7;
-    for (const f of fx.floats) {
+
+    // 同一条竖线上会同时挂好几条浮字（"×2 换位" 撞 "连消"，再撞 "清空跑道"），
+    // 上一版就是三行糊成一团的。这里按 x 分列，同列从下往上排，
+    // 任意两条之间至少留一个行高——浮字可以飘，但不能叠。
+    const placed = [];
+    const list = fx.floats.slice().sort((a, b) => b.y - a.y);
+    for (const f of list) {
       const a = Math.max(0, f.life / f.max);
-      const y = f.y - (1 - a) * 46;
+      let y = f.y - (1 - a) * 46;
+      for (let guard = 0; guard < 6; guard++) {
+        const hit = placed.find((q) => Math.abs(q.x - f.x) < 150 && Math.abs(q.y - y) < f.size + q.size + 2);
+        if (!hit) break;
+        y = hit.y - (f.size + hit.size) / 2 - 4;
+      }
+      placed.push({ x: f.x, y, size: f.size });
+
       ctx.globalAlpha = a;
       ctx.font = `700 ${f.size}px ${MONO}`;
       ctx.fillStyle = f.color;
@@ -1552,24 +1884,54 @@ export class Renderer {
   comboMeter(game) {
     const ctx = this.ctx;
     const pips = 12;
-    const w = 18, gap = 6;
+    const w = 20, gap = 6;
     const total = pips * w + (pips - 1) * gap;
     const x0 = CX - total / 2;
-    const y = 708;
+    const y = 700;
     const filled = Math.min(game.combo, pips);
     const mult = comboMult(game.combo);
+    const hot = game.combo >= 10;
 
-    ctx.textAlign = 'center';
-    if (game.combo >= 2) {
-      const k = Math.min(1, game.combo / 12);
-      ctx.font = `700 13px ${MONO}`;
-      ctx.fillStyle = `rgba(255,214,90,${0.55 + 0.45 * k})`;
-      ctx.fillText(`连消 ${game.combo}　×${mult.toFixed(2)}${game.combo >= 10 ? '　RUSH!' : ''}`, CX, y - 16);
-    } else {
-      ctx.font = `600 11px ${MONO}`;
-      ctx.fillStyle = 'rgba(160,200,250,0.22)';
-      ctx.fillText('3 秒内持续消除 → 连消加成', CX, y - 16);
-    }
+    // 控制台底座。上一版是三根光秃秃的进度条浮在空地上，读起来像网页控件，
+    // 和上面那台机器没有任何关系。垫一块面板、两端收个圆角，
+    // 它就变成"这台机器下面的操作台"——这是把 UI 收进世界观最省事的一招。
+    const pw = total + 148, ph = 42;
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(CX - pw / 2, y - 21, pw, ph, ph / 2);
+    const pg = ctx.createLinearGradient(0, y - 21, 0, y + 21);
+    pg.addColorStop(0, '#1A2432');
+    pg.addColorStop(0.46, '#0C131C');
+    pg.addColorStop(1, '#070B11');
+    ctx.fillStyle = pg;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // 上沿一道亮线，下沿一道冷光
+    ctx.beginPath();
+    ctx.moveTo(CX - pw / 2 + 18, y - 20);
+    ctx.lineTo(CX + pw / 2 - 18, y - 20);
+    ctx.strokeStyle = 'rgba(190,230,255,0.16)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(CX - pw / 2 + 24, y + 21);
+    ctx.lineTo(CX + pw / 2 - 24, y + 21);
+    ctx.strokeStyle = 'rgba(70,190,255,0.10)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+
+    // 两侧读数
+    ctx.textAlign = 'left';
+    ctx.font = `600 10px ${MONO}`;
+    ctx.fillStyle = 'rgba(150,190,240,0.26)';
+    ctx.fillText('COMBO', x0 - 66, y + 4);
+    ctx.textAlign = 'right';
+    ctx.font = `700 13px ${MONO}`;
+    ctx.fillStyle = mult > 1.0001 ? `rgba(255,214,90,${0.6 + 0.4 * Math.min(1, game.combo / 12)})` : 'rgba(150,190,240,0.22)';
+    ctx.fillText(mult > 1.0001 ? `×${mult.toFixed(2)}` : '×1.00', x0 + total + 66, y + 5);
 
     for (let i = 0; i < pips; i++) {
       const x = x0 + i * (w + gap);
@@ -1578,8 +1940,13 @@ export class Renderer {
       ctx.roundRect(x, y, w, 6, 3);
       ctx.fillStyle = on
         ? (i >= 9 ? '#FF6B7A' : i >= 6 ? '#FFD65A' : '#5AC8FA')
-        : 'rgba(255,255,255,0.08)';
+        : 'rgba(255,255,255,0.07)';
+      if (on) {
+        ctx.shadowColor = i >= 9 ? 'rgba(255,90,110,0.8)' : i >= 6 ? 'rgba(255,200,80,0.7)' : 'rgba(90,200,250,0.7)';
+        ctx.shadowBlur = 9;
+      }
       ctx.fill();
+      ctx.shadowBlur = 0;
     }
 
     // 剩余窗口：断了就归零，玩家能看见"还剩多久"
@@ -1589,6 +1956,19 @@ export class Renderer {
       ctx.roundRect(x0, y + 11, total * left, 2.5, 1.2);
       ctx.fillStyle = `rgba(150,230,255,${0.15 + 0.5 * left})`;
       ctx.fill();
+    }
+
+    // 状态文案：放在控制台正下方，不再和浮字抢同一行
+    ctx.textAlign = 'center';
+    if (game.combo >= 2) {
+      const k = Math.min(1, game.combo / 12);
+      ctx.font = `700 13px ${MONO}`;
+      ctx.fillStyle = hot ? `rgba(255,120,130,${0.6 + 0.4 * Math.sin(this.t * 9)})` : `rgba(255,214,90,${0.55 + 0.45 * k})`;
+      ctx.fillText(`连消 ${game.combo}${hot ? '　RUSH!' : ''}`, CX, y + 40);
+    } else {
+      ctx.font = `600 11px ${MONO}`;
+      ctx.fillStyle = 'rgba(160,200,250,0.22)';
+      ctx.fillText('3 秒内持续消除 → 连消加成', CX, y + 40);
     }
   }
 
