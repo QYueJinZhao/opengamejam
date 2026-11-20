@@ -73,7 +73,12 @@ export const BASE_CFG = {
   //
   // 代价：链条在飞行期间滑过约 1.1 槽（drift 1.35 × 0.80），超过一整格。
   // 所以落点预告环不是装饰品，是这个时长能玩的前提（见 render 的 predSlots）。
-  flightTime: 0.80,
+  //
+  // 参数从"飞行时长"改成"飞行速度"：炮口到轨道的距离是几何（nozzleGap），
+  // 时长由 dist/speed 推出来。现在两者等价（间距恒定），但语义正过来了——
+  // 以后改炮管长度、或者改成斜射，速度不用重调，时长自己跟着变。
+  nozzleGap: 3.7,      // 炮口到轨道中心线的世界距离（render 的法向偏移用同一个值）
+  flightSpeed: 4.6,    // 世界单位 / 秒。3.7 / 4.6 ≈ 0.80s，和上一版观感一致
   beatStart: 3.40,
   beatEnd: 2.05,
   rampSec: 90,
@@ -98,11 +103,17 @@ export const BASE_CFG = {
   rustStart: 24,
   rustEvery: 9,
 
-  // ---- ×2 得分槽 ----
-  // 槽位按**弧长**固定在世界坐标上（不跟珠子走），所以消除必须"打在那一段"。
-  // 每 padEvery 秒整体换位一次，逼玩家重新规划，而不是记住一个点位就完事。
-  padEvery: 20,
-  padHalf: 2.0,        // 槽半长，单位是槽；×2 判定范围 = ±padHalf 格
+  // ---- 珠子补位速度 ----
+  // 珠子被推挤时记一个 dx（"我视觉上还在旧位置"），渲染时画在 slot+dx。
+  // 原来用指数衰减（dx *= exp(-26dt)）：位移大的珠子初速极高，位移小的慢慢晃，
+  // 但**所有珠子都在同一时间停下**——这就是"指定时间"。
+  // 改成恒速之后，dx 每秒固定减 dxSpeed 格：挪 1 格就 1/dxSpeed 秒，挪 6 格就久 6 倍。
+  // 观感差别很大：原来一整列珠子是"啪"一下同时归位，现在是后一颗追前一颗。
+  //
+  // 取 11：1 格 ≈ 0.09s（几乎无感），5 格 ≈ 0.45s（看得见滑过去）。
+  // 取 7 试过，5 格要 0.71s——滑是滑了，但珠子会长时间叠在邻居身上，
+  // 读起来像"珠子堆住了"而不是"珠子在追"。
+  dxSpeed: 11.0,       // 格 / 秒
 };
 
 export const CFG = { ...BASE_CFG };
@@ -133,12 +144,6 @@ export function mulberry32(seed) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-/** 闭合环上两点的最短弧长距离 */
-function circDist(a, b, L) {
-  const d = Math.abs(a - b) % L;
-  return Math.min(d, L - d);
 }
 
 let beadSeq = 1;
@@ -205,9 +210,6 @@ export class Game {
     this.rustPlaced = 0;
     this.bombs = 0;
     this.wilds = 0;
-    this.padClock = 0;
-    this.pads = [];
-    this.padHits = 0;
     this.shots = 0;
     this.drops = 0;
     this.clears = 0;
@@ -219,7 +221,6 @@ export class Game {
     this.events = [];
 
     this.placeOpening();
-    this.rollPads();
   }
 
   // 开局阵型：每个落点周围铺一段，段内不允许出现现成三连
@@ -390,8 +391,14 @@ export class Game {
     this.v = Math.max(-CFG.vMax, Math.min(CFG.vMax, this.v));
     this.phase = mod(this.phase + this.v * dt, N);
 
-    const decay = Math.exp(-dt * 26);
-    for (const b of this.slots) if (b) b.dx *= decay;
+    // 补位：恒速收拢，不是指数衰减。
+    // 每颗珠子以 dxSpeed 格/秒往回滑，位移大就滑得久——所以一整列被推挤的珠子
+    // 会依次归位，后面那颗追着前面那颗，而不是"啪"一声全体同时落位。
+    const step = CFG.dxSpeed * dt;
+    for (const b of this.slots) {
+      if (!b || b.dx === 0) continue;
+      b.dx = b.dx > 0 ? Math.max(0, b.dx - step) : Math.min(0, b.dx + step);
+    }
     if (this.chain > 0 && this.time - this.chainT > 1.1) this.chain = 0;
     if (this.combo > 0 && this.time - this.comboT > COMBO_WINDOW) {
       if (this.combo >= 3) this.events.push({ type: 'combobreak', combo: this.combo });
@@ -414,18 +421,9 @@ export class Game {
       }
     }
 
-    if (CFG.padEvery > 0) {
-      this.padClock += dt;
-      if (this.padClock >= CFG.padEvery) {
-        this.padClock -= CFG.padEvery;
-        this.rollPads();
-        this.events.push({ type: 'padmove' });
-      }
-    }
-
     if (this.balls.length) {
       for (const b of this.balls) b.t += dt;
-      if (this.balls[0].t >= CFG.flightTime) this.land();
+      if (this.balls[0].t >= this.balls[0].dur) this.land();
     }
 
     if (this.time >= CFG.levelTime) this.kill('time');
@@ -436,11 +434,16 @@ export class Game {
     const idxs = this.nextVolley();
     if (CFG.rotate && n >= 3) this.volleyIndex = (this.volleyIndex + 1) % n;
 
+    // 时长由**速度**推出来，不是写死的秒数。飞行距离现在是恒定的（炮口正下方），
+    // 但这条式子不假设它恒定：以后炮管拉长、或者改成斜射，只要 dist 变了，
+    // 时长自己跟着变，速度不用重调。
+    const dur = CFG.nozzleGap / CFG.flightSpeed;
+
     this.balls = idxs.map((i) => {
       const ci = this.queues[i][0];
       this.queues[i].shift();
       this.queues[i].push(this.pickShot());
-      return { ci, off: this.nozzleOff[i], idx: i, t: 0 };
+      return { ci, off: this.nozzleOff[i], idx: i, t: 0, dur };
     });
 
     this.shots++;
@@ -629,28 +632,6 @@ export class Game {
     this.events.push({ type: 'rust', slot: at, s: mod(at + this.phase, N) * D });
   }
 
-  /**
-   * 重掷两个 ×2 槽的位置。
-   *
-   * 约束和"发球口"保持距离：槽如果正好压在炮口落点上，玩家什么都不用做就能
-   * 吃到双倍，这个机制就变成了白送分。要让它有意义，必须"绕过去打"。
-   */
-  rollPads() {
-    this.pads = [];
-    if (!(CFG.padEvery > 0)) return;
-    const avoid = this.nozzleOff.map((o) => o * D);
-    const pick = () => {
-      for (let t = 0; t < 60; t++) {
-        const s = this.rng() * L;
-        if (avoid.every((a) => circDist(s, a, L) > CFG.padAvoid * D) &&
-            this.pads.every((p) => circDist(s, p.s, L) > 7 * D)) return s;
-      }
-      return this.rng() * L;
-    };
-    this.pads.push({ s: pick() });
-    this.pads.push({ s: pick() });
-  }
-
   // ---- 消除 + 连锁 + 连消 ----
   resolve(startSlot = -1, off = 0) {
     let chain = 0;
@@ -683,19 +664,11 @@ export class Game {
       }
 
       const s0 = mod(start + this.phase, N) * D;
-      // ×2 槽的判定点是消除段的**中心弧长**，不是落点。
-      // 玩家要瞄的是"让这一下消在槽里"，而不是"把球打进槽里"——差别很大。
-      let padHit = false;
-      for (const pad of this.pads) {
-        if (circDist(mod(s0 + len * 0.5 * D, L), pad.s, L) <= CFG.padHalf * D) { padHit = true; break; }
-      }
-      if (padHit) this.padHits++;
 
       const chainMult = CHAIN_MULT[Math.min(chain - 1, CHAIN_MULT.length - 1)];
       const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
       const base = BASE_SCORE(run.len) + rustN * 200;
-      const padMult = padHit ? 2 : 1;
-      const gain = Math.round(base * chainMult * comboMult * padMult);
+      const gain = Math.round(base * chainMult * comboMult);
       this.score += gain;
       this.clears++;
 
@@ -710,7 +683,7 @@ export class Game {
       }
 
       this.events.push({
-        type: 'clear', chain, gain, base, chainMult, comboMult, padMult, padHit, rustN,
+        type: 'clear', chain, gain, base, chainMult, comboMult, rustN,
         colors, positions, len, off, s0,
         combo: this.combo,
       });
@@ -791,7 +764,13 @@ export class Game {
   }
 
   flightProgress() {
-    return this.balls.length ? Math.min(1, this.balls[0].t / CFG.flightTime) : 0;
+    return this.balls.length ? Math.min(1, this.balls[0].t / this.balls[0].dur) : 0;
+  }
+
+  /** 这一发还要飞多久（秒）。渲染的落点预告和机器人都要用它算链条会滑多远。 */
+  flightLeft() {
+    const b = this.balls[0];
+    return b ? Math.max(0, b.dur - b.t) : 0;
   }
 
   drainEvents() {

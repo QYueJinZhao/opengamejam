@@ -17,15 +17,12 @@ const ffParam = Number(params.get('ff') || 0);
 // ?bot=1 交给机器人操作。它不只是调试开关：无头截图要靠它才截得到真实中高分段，
 // 否则空转快进会在十几秒内塞满跑道，永远只截到 C 段。
 const botOn = params.get('bot') === '1';
-// ?ft=秒 覆盖飞行时长（0.2~1.4）。
-// 这个参数存在的理由：0.80s 是推算出来的，不是测出来的——合成速度进了人眼
-// 舒适区，但"多少秒最舒服"只有上手才知道。改 BASE_CFG 而不是 CFG，是因为
-// 每次 new Game 都会用 Object.assign(CFG, BASE_CFG, mode.cfg) 重置。
-const ftParam = Number(params.get('ft') || 0);
-if (ftParam > 0) BASE_CFG.flightTime = Math.max(0.2, Math.min(1.4, ftParam));
-// ?pads=0 关掉 ×2 得分槽。设计稿里这个模块本来就要"可独立控制显隐"，
-// 关掉之后分数会整体下降，段位线也会失真——所以它只当调试开关，不进设置面板。
-if (params.get('pads') === '0') BASE_CFG.padEvery = 0;
+// ?fs=速度 覆盖飞行速度（世界单位/秒，3~14）。速度越大球越快落地。
+// 这个参数存在的理由：4.6 是推算出来的，不是测出来的——"这个速度看起来像不像
+// 飞过去"只有上手才知道。改 BASE_CFG 而不是 CFG，是因为每次 new Game 都会用
+// Object.assign(CFG, BASE_CFG, mode.cfg) 重置。
+const fsParam = Number(params.get('fs') || 0);
+if (fsParam > 0) BASE_CFG.flightSpeed = Math.max(2, Math.min(20, fsParam));
 
 // ---------- 本地记录 ----------
 const BEST_KEY = 'bcj.best.v2';
@@ -143,9 +140,6 @@ function handleEvents() {
       }
 
       float(`+${e.gain}`, mid.x, mid.y - 30, e.chain >= 2 ? 32 : 26, e.chain >= 2 ? '#FFD65A' : '#E8F0FA');
-      if (e.padHit) {
-        float('×2 双倍', mid.x, mid.y - 58, 20, '#FFD65A');
-      }
       if (e.chain >= 2) {
         float(`连锁 ×${e.chainMult.toFixed(1)}`, mid.x, mid.y - 64, 18, '#FFD65A');
       }
@@ -177,12 +171,6 @@ function handleEvents() {
       shock(p.x, p.y, 3, 26, 0.34, 'rgba(150,140,125,ALPHA)', 2);
       float('锈球', p.x, p.y - 26, 13, 'rgba(198,188,174,0.9)');
       if (!silent) sfx.clank();
-    } else if (e.type === 'padmove') {
-      for (const pad of game.pads) {
-        const p = arcToScreen(pad.s);
-        shock(p.x, p.y, 5, 34, 0.5, 'rgba(255,214,90,ALPHA)', 2);
-      }
-      float('×2 换位', 600, 656, 15, 'rgba(255,214,90,0.85)');
     } else if (e.type === 'combo') {
       if (!silent && (e.combo === 3 || e.combo === 6 || e.combo === 10)) {
         sfx.rushUp(e.combo);

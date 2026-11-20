@@ -216,7 +216,7 @@ export class Renderer {
   }
 
   // ---------- 底盘 ----------
-  // 绘制顺序是定死的：托盘 → 飞轮 → 凹槽导轨 → 双倍槽 → 珠子。
+  // 绘制顺序是定死的：托盘 → 飞轮 → 凹槽导轨 → 机芯 → 挂板 → 珠子。
   // 飞轮必须压在托盘上、又在导轨之下，否则齿会盖住跑道边。
   chassis(game) {
     this.plate();
@@ -224,7 +224,6 @@ export class Renderer {
     this.groove();
     this.core(game);
     this.gantry(game);
-    this.pads(game);
   }
 
   /**
@@ -644,93 +643,6 @@ export class Renderer {
     ctx.restore();
   }
 
-  /**
-   * ×2 得分槽：铺在轨道上的一小段发光带。
-   *
-   * 它不是装饰，是有坐标的判定区：消除段的**中心**落在这段弧里才双倍。
-   * 所以画法必须让"范围"可读——带子有多长，判定就有多长，不能画成一个点。
-   */
-  pads(game) {
-    if (!game || !game.pads || !game.pads.length) return;
-    const ctx = this.ctx;
-    const halfW = CHANNEL_W * 0.46;
-    const half = CFG.padHalf * D;
-
-    for (let i = 0; i < game.pads.length; i++) {
-      const pad = game.pads[i];
-      const steps = 10;
-      const pulse = 0.5 + 0.5 * Math.sin(this.t * 2.4 + i * 2.1);
-
-      const outer = [], inner = [];
-      for (let k = 0; k <= steps; k++) {
-        const s = pad.s - half + 2 * half * (k / steps);
-        const p = this.toScreen(pointAt(s));
-        const n = normalAt(s);
-        outer.push([p.x + n.x * halfW, p.y + n.y * halfW]);
-        inner.push([p.x - n.x * halfW, p.y - n.y * halfW]);
-      }
-
-      ctx.save();
-      // 1) 光带。这一处改了四稿，每次都是"多画一点就变成另一个东西"：
-      //    平涂暖色 → 轨道里多了一块边界分明的褐色补丁
-      //    平涂 + 暗底 → 一根实心芥末条，把珠子全压住
-      //    三道递减线 → 没有珠子盖着的地方露出两三根平行的金线，像布了线
-      //    最后只留**外沿一道**：贴着槽壁、珠子压不到，长度即判定范围，
-      //    两端再加短封头。判定区该只被读成"这一段边上亮着"，不该是任何面。
-      //    取 0.478 是因为珠子半径是 0.443 倍槽宽——再往里就被珠子吃掉了。
-      const bands = [[0.478, 3.0, 0.46]];
-      for (let bi = 0; bi < bands.length; bi++) {
-        const [d, w, a] = bands[bi];
-        ctx.beginPath();
-        for (let k = 0; k <= steps; k++) {
-          const s = pad.s - half + 2 * half * (k / steps);
-          const q = this.toScreen(pointAt(s));
-          const n = normalAt(s);
-          const qx = q.x + n.x * CHANNEL_W * d, qy = q.y + n.y * CHANNEL_W * d;
-          if (k === 0) ctx.moveTo(qx, qy); else ctx.lineTo(qx, qy);
-        }
-        ctx.lineCap = 'round';
-        ctx.strokeStyle = `rgba(255,206,80,${(a * (0.78 + 0.42 * pulse)).toFixed(3)})`;
-        ctx.lineWidth = w;
-        if (bi === 0) {
-          ctx.shadowColor = 'rgba(255,196,60,0.85)';
-          ctx.shadowBlur = 12;
-        }
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-        ctx.lineCap = 'butt';
-      }
-
-      // 2) 两端封头：判定区必须有明确的起止，否则"差半格算不算"只能靠猜。
-      //    只画外沿往内的前 60%——画满整条槽会读成两堵挡在跑道上的墙。
-      for (const e of [0, steps]) {
-        const se = pad.s - half + 2 * half * (e / steps);
-        const q = this.toScreen(pointAt(se));
-        const n = normalAt(se);
-        ctx.beginPath();
-        ctx.moveTo(q.x + n.x * halfW * 1.06, q.y + n.y * halfW * 1.06);
-        ctx.lineTo(q.x + n.x * halfW * 0.62, q.y + n.y * halfW * 0.62);
-        ctx.strokeStyle = `rgba(255,226,140,${(0.34 + 0.26 * pulse).toFixed(3)})`;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-      ctx.restore();
-
-      // ×2 标签压在外侧，避开珠子
-      const cp = this.toScreen(pointAt(pad.s));
-      const cn = normalAt(pad.s);
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.font = `800 13px ${MONO}`;
-      ctx.fillStyle = `rgba(255,214,90,${(0.58 + 0.34 * pulse).toFixed(3)})`;
-      ctx.shadowColor = 'rgba(255,190,60,0.9)';
-      ctx.shadowBlur = 10;
-      ctx.fillText('×2', cp.x + cn.x * (CHANNEL_W * 0.88), cp.y + cn.y * (CHANNEL_W * 0.88));
-      ctx.restore();
-    }
-  }
-
   slotTicks(game) {
     const ctx = this.ctx;
     ctx.save();
@@ -789,8 +701,8 @@ export class Renderer {
   // 幽灵球与珠链高亮共用这一个值，否则两处提示会互相打架。
   coastSlots(game) {
     const T = game.balls.length
-      ? Math.max(0, CFG.flightTime - game.balls[0].t)
-      : (game.beat - game.beatClock) + CFG.flightTime;
+      ? game.flightLeft()
+      : (game.beat - game.beatClock) + CFG.nozzleGap / CFG.flightSpeed;
     const k = CFG.dampK, drift = CFG.drift;
     return drift * T + (game.v - drift) * (1 - Math.exp(-k * T)) / k;
   }
@@ -1315,9 +1227,14 @@ export class Renderer {
   }
 
   // ---------- 飞行球 ----------
-  // 轨迹：出膛快 → 临近链条减速，再叠一个向外的抛物线弧度。
-  // 缓动曲线用缓出（ease-out）而不是缓入缓出：smoothstep 在中段速度是平均值的 1.5 倍，
-  // 正是那一下"窜"让 0.2 秒的飞行看起来像瞬移。
+  // 轨迹：炮口 → 落点，**匀速直线**。
+  //
+  // 上一版是"半线性 + 半 smoothstep"，两端慢、中段 1.5 倍速。那条曲线的问题不是
+  // 不好看，是它让"球多快"这件事没法用一个数说清——你调的是时长，看到的却是
+  // 变速。现在进度就是时间比例，速度 = nozzleGap / flightSpeed，一个数管全程。
+  //
+  // 之前那点横向弧线也一起去掉了：它让合速度在两端慢、中段快（±39%），
+  // 和"匀速"直接打架；而它原本的作用是绕开双炮中间的门架，门架已经不画了。
   projectile(game) {
     for (let i = 0; i < game.balls.length; i++) this.drawProjectile(game, game.balls[i]);
   }
@@ -1325,28 +1242,17 @@ export class Renderer {
   drawProjectile(game, ball) {
     const ctx = this.ctx;
     const c = ballSkin(ball.ci);
-    const k = Math.min(1, ball.t / CFG.flightTime);
+    const k = Math.min(1, ball.t / ball.dur);
 
     const from = NOZZLES[ball.idx] || NOZZLES[0];
     const to = IMPACTS[ball.idx] || IMPACTS[0];
     if (!from || !to) return;
 
     // 同一套路径函数：球体和尾迹必须走同一条曲线，否则尾迹会脱轨
-    const pos = (u) => {
-      // 半线性 + 半 smoothstep：接近匀速，两端各有一点起落，中段不会像
-      // 纯 smoothstep 那样窜（峰值 1.5 倍速）——那正是"一闪就到"的来源。
-      const sm = u * u * (3 - 2 * u);
-      const e = 0.5 * u + 0.5 * sm;
-      // 弧线沿切线方向（垂直于出膛方向）。早先沿外法向鼓，正好顶在前进方向的反面，
-      // 球看起来像"卡在炮口没动"。
-      // 左右半边镜像：双炮并排时两发球朝各自的外侧绕，中门架不会被轨迹切穿。
-      const side = from.x < -0.001 ? -1 : 1;
-      const arc = Math.sin(Math.PI * Math.min(1, u)) * 0.46 * side;   // 世界单位
-      return this.toScreen({
-        x: from.x + (to.x - from.x) * e + from.tx * arc,
-        y: from.y + (to.y - from.y) * e + from.ty * arc,
-      });
-    };
+    const pos = (u) => this.toScreen({
+      x: from.x + (to.x - from.x) * u,
+      y: from.y + (to.y - from.y) * u,
+    });
 
     for (let i = 5; i >= 1; i--) {
       const u = Math.max(0, k - i * 0.055);

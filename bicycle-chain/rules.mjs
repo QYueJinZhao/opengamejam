@@ -58,26 +58,36 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   ok(g.occupied() === 4, `4 颗相邻锈球不会被消掉（剩 ${g.occupied()}）`);
 }
 
-// 6) ×2 槽：消除中心在槽内 → padMult=2，在槽外 → 1（直接读事件，不受清盘奖励干扰）
+// 6) 珠子补位：恒定速度推进，不是"固定时间、按比例衰减"
+//
+// 这一条守的是观感，不是数值。上一版用 dx *= exp(-26dt)，位移大的珠子初速极高、
+// 位移小的慢慢晃，但它们在**同一时刻**停下——一整列珠子同时归位。
+// 改成恒速后，dx 每秒固定减 dxSpeed 格：挪得远就滑得久。
 {
-  const trial = (padAt) => {
-    const g = new Game(16, 'standard');
-    g.slots.fill(null);
-    for (let i = 0; i < 3; i++) g.slots[mod(9 + i, N)] = g.makeBead(0);
-    for (let i = 0; i < 6; i++) g.slots[mod(20 + i, N)] = g.makeBead(1);
-    g.pads = [];
-    const arc = mod(9 + 1 + g.phase, N) * (49.139242 / N);
-    g.pads = [{ s: padAt(arc) }];
-    g.drainEvents();
-    g.resolve(-1, 0);
-    const ev = g.drainEvents().find((e) => e.type === 'clear');
-    return ev;
+  const g = new Game(16, 'standard');
+  g.slots.fill(null);
+  g.slots[5] = g.makeBead(0);
+
+  g.slots[5].dx = 3.5;
+  g.step(1 / CFG.dxSpeed);                 // 一个"格时长"应该正好走掉 1 格
+  ok(Math.abs(g.slots[5].dx - 2.5) < 1e-9, `补位按固定速度推进（3.5 → ${g.slots[5].dx.toFixed(3)}）`);
+
+  g.slots[5].dx = 0.4;
+  g.step(1 / CFG.dxSpeed);                 // 剩余不足一格：一次走完，不能越过 0
+  ok(g.slots[5].dx === 0, '不足一格时一次归位，不会越界成反向偏移');
+
+  // 位移越大耗时越久——这正是"指数衰减"做不到的
+  const timeToSettle = (dx) => {
+    const h = new Game(16, 'standard');
+    h.slots.fill(null);
+    h.slots[5] = h.makeBead(0);
+    h.slots[5].dx = dx;
+    let t = 0;
+    while (h.slots[5].dx !== 0 && t < 5) { h.step(1 / 120); t += 1 / 120; }
+    return t;
   };
-  const inside = trial((arc) => arc);
-  const outside = trial((arc) => arc + 24);
-  ok(inside && inside.padMult === 2 && inside.padHit === true, '消除中心在槽内 → ×2');
-  ok(outside && outside.padMult === 1, '消除中心在槽外 → 不加倍');
-  ok(inside.gain === outside.gain * 2, `槽内得分正好是槽外两倍（${inside.gain} vs ${outside.gain}）`);
+  const t1 = timeToSettle(1), t4 = timeToSettle(4);
+  ok(t4 > t1 * 3.2, `挪 4 格比挪 1 格明显更久（${t1.toFixed(2)}s vs ${t4.toFixed(2)}s）`);
 }
 
 // 7) 全流程不变式：跑一局，检查不变量

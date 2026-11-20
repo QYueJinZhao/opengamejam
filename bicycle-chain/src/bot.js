@@ -60,9 +60,11 @@ export function botInput(game) {
 
   // 截止时刻：有球在飞时，真正的截止是「它落地」，不是「下一拍发射」。
   // T 设下限 0.30：否则临近落地时增益 1/T 会发散，机器人每帧满速乱撞。
+  // 剩余飞行时间取 game.flightLeft()，不写死常量——时长现在由速度推出来，
+  // 以后飞行速度变了，机器人自动跟着改，不会出现"人类变慢、机器人还按老节奏算"。
   const T = Math.max(0.30, game.balls.length
-    ? CFG.flightTime - game.balls[0].t
-    : (game.beat - game.beatClock) + CFG.flightTime);
+    ? game.flightLeft()
+    : (game.beat - game.beatClock) + CFG.nozzleGap / CFG.flightSpeed);
 
   // 发射后收手：飞行期间不再改向，边飞边改会把自己的落点带偏。
   if (game.balls.length) return 0;
