@@ -1,14 +1,16 @@
 // Canvas2D 渲染层。虚拟画布 1200×800，按窗口等比缩放。
 import { C, R, L, N, D, pointAt, mod } from './geom.js';
-import { PALETTE, CFG } from './sim.js';
+import { PALETTE, CFG, NOZZLE_OFF } from './sim.js';
 
 const VW = 1200, VH = 800;
 const CX = 600, CY = 400;
 const S = 30;                 // 世界单位 → 像素
 const BEAD_R = (D * S) / 2 * 0.94;
-const CHANNEL_W = D * S * 0.88;
-const NOZZLE_Y = -10.5;
-const IMPACT = pointAt(0);
+const CHANNEL_W = D * S * 1.06;   // 槽宽必须略大于珠径，否则珠子会溢出跑道
+
+// 两个喷头：主在顶部朝下、副在底部朝上；落点相距半圈
+const NOZZLE_POS = [{ x: 0, y: -10.6 }, { x: 0, y: 9.8 }];
+const IMPACT = [pointAt(0), pointAt(L / 2)];
 
 const FONT = '"Inter","PingFang SC","Microsoft YaHei",system-ui,sans-serif';
 const MONO = 'ui-monospace,"SF Mono",Consolas,"Cascadia Mono",monospace';
@@ -136,21 +138,22 @@ export class Renderer {
     ctx.restore();
 
     // 槽体（比背景亮一档，才读得出是跑道）
-    const grad = ctx.createLinearGradient(0, CY - R * S - 20, 0, CY + R * S + 20);
-    grad.addColorStop(0, '#131E2E');
-    grad.addColorStop(0.5, '#0C1420');
-    grad.addColorStop(1, '#111B29');
+    const grad = ctx.createLinearGradient(0, CY - R * S - 34, 0, CY + R * S + 34);
+    grad.addColorStop(0, '#1B2A3F');
+    grad.addColorStop(0.5, '#101B2A');
+    grad.addColorStop(1, '#182740');
     ctx.strokeStyle = grad;
     ctx.lineWidth = CHANNEL_W;
     this.stadiumPath(ctx);
     ctx.stroke();
 
     // 内外缘高光
-    ctx.strokeStyle = 'rgba(120,180,255,0.22)';
-    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = 'rgba(130,190,255,0.30)';
+    ctx.lineWidth = 2;
     this.stadiumPath(ctx, CHANNEL_W);
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(120,180,255,0.13)';
+    ctx.strokeStyle = 'rgba(130,190,255,0.20)';
+    ctx.lineWidth = 2;
     this.stadiumPath(ctx, -CHANNEL_W);
     ctx.stroke();
 
@@ -197,15 +200,14 @@ export class Renderer {
   slotTicks(game) {
     const ctx = this.ctx;
     ctx.save();
-    ctx.lineWidth = 1;
     for (let i = 0; i < N; i++) {
+      if (game.slots[i]) continue;   // 有珠的槽不画点，避免被珠子压住显脏
       const s = mod(i + game.phase, N) * D;
       const p = this.toScreen(pointAt(s));
-      const a = s * 0.0 + (i % 7 === 0 ? 0.16 : 0.07);
-      ctx.strokeStyle = `rgba(140,190,255,${a})`;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, BEAD_R + 7, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.arc(p.x, p.y, i % 7 === 0 ? 2.0 : 1.3, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(140,190,255,${i % 7 === 0 ? 0.20 : 0.10})`;
+      ctx.fill();
     }
     ctx.restore();
   }
@@ -229,16 +231,22 @@ export class Renderer {
     }
   }
 
-  // 0..1：这颗珠还有多久到落点（越接近 1 越"马上要被接住"）
+  // 0..1：这颗珠还有多久到「最近的落点」（越接近 1 越"马上要被接住"）
   arrivalAlpha(game, s) {
     const v = game.v;
     const av = Math.abs(v);
     if (av < 0.08) return 0;
-    const p = s / D;                       // 槽位坐标
-    const dist = v > 0 ? mod(N - p, N) : mod(p, N);
+    const p = s / D;                       // 珠子的槽位坐标（连续）
     const reach = av * CFG.flightTime;     // 飞行期间会走过的槽数
-    if (dist > reach) return 0;
-    return 1 - dist / Math.max(reach, 0.001) * 0.75;
+    const n = game.nozzleCount();
+    let best = 0;
+    for (let i = 0; i < n; i++) {
+      const tgt = mod(-game.phase + NOZZLE_OFF[i], N);
+      const dist = v > 0 ? mod(tgt - p, N) : mod(p - tgt, N);
+      if (dist > reach) continue;
+      best = Math.max(best, 1 - dist / Math.max(reach, 0.001) * 0.75);
+    }
+    return best;
   }
 
   drawBead(s, b, near) {
@@ -314,6 +322,11 @@ export class Renderer {
     } else if (kind === 'square') {
       ctx.rect(x - r * 0.78, y - r * 0.78, r * 1.56, r * 1.56);
       ctx.fill();
+    } else if (kind === 'cross') {
+      const w = r * 0.34, h = r * 0.95;
+      ctx.rect(x - w, y - h, w * 2, h * 2);
+      ctx.rect(x - h, y - w, h * 2, w * 2);
+      ctx.fill();
     } else {
       ctx.moveTo(x, y - r);
       ctx.lineTo(x + r * 0.78, y);
@@ -327,9 +340,38 @@ export class Renderer {
 
   // ---------- 落点 ----------
   reticle(game) {
+    const n = game.nozzleCount();
+    for (let i = 0; i < n; i++) this.reticleAt(game, i);
+  }
+
+  reticleAt(game, idx) {
     const ctx = this.ctx;
-    const p = this.toScreen(IMPACT);
-    const pulse = 0.5 + 0.5 * Math.sin(this.t * 5);
+    const p = this.toScreen(IMPACT[idx]);
+    const pulse = 0.5 + 0.5 * Math.sin(this.t * 5 + idx * 1.9);
+
+    // 落点为空：球会吸附到最近的珠子。画一条虚线把"炮口指向"和"实际插入点"连起来，
+    // 否则玩家会以为球钉在了空皮带上。
+    const dropSlot = game.impactSlot(NOZZLE_OFF[idx]);
+    const snapSlot = game.snap(dropSlot);
+    if (snapSlot !== dropSlot) {
+      const sp = this.toScreen(pointAt(game.beadWorldS(snapSlot)));
+      ctx.save();
+      ctx.setLineDash([3, 7]);
+      ctx.strokeStyle = `rgba(255,196,110,${0.20 + 0.16 * pulse})`;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(sp.x, sp.y);
+      ctx.stroke();
+      ctx.restore();
+
+      // 实际插入点小环
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, BEAD_R + 8, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,196,110,${0.22 + 0.14 * pulse})`;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
 
     // 容差刻度 ±0.25 格
     const halfW = 0.25 * D * S;
@@ -345,7 +387,7 @@ export class Renderer {
     // 旋转虚线环
     ctx.save();
     ctx.translate(p.x, p.y);
-    ctx.rotate(this.t * 0.9);
+    ctx.rotate(this.t * 0.9 * (idx ? -1 : 1));
     ctx.setLineDash([5, 9]);
     ctx.strokeStyle = `rgba(150,210,255,${0.30 + 0.18 * pulse})`;
     ctx.lineWidth = 2;
@@ -366,14 +408,17 @@ export class Renderer {
 
   // ---------- 飞行球 ----------
   projectile(game) {
-    if (!game.ball) return;
+    for (let i = 0; i < game.balls.length; i++) this.drawProjectile(game, game.balls[i], i);
+  }
+
+  drawProjectile(game, ball, idx) {
     const ctx = this.ctx;
-    const c = PALETTE[game.ball.ci];
-    const k = Math.min(1, game.ball.t / CFG.flightTime);
+    const c = PALETTE[ball.ci];
+    const k = Math.min(1, ball.t / CFG.flightTime);
     const ease = k * k * (3 - 2 * k);
 
-    const from = { x: 0, y: NOZZLE_Y + 0.9 };
-    const to = IMPACT;
+    const from = NOZZLE_POS[idx] || NOZZLE_POS[0];
+    const to = IMPACT[idx] || IMPACT[0];
     const x = (from.x + (to.x - from.x) * ease);
     const y = (from.y + (to.y - from.y) * ease);
     const p = this.toScreen({ x, y });
@@ -414,55 +459,82 @@ export class Renderer {
 
   // ---------- 炮口 ----------
   nozzle(game) {
+    const n = game.nozzleCount();
+    for (let i = 0; i < n; i++) this.drawNozzle(game, i, false);
+    // 未激活的副炮口：画一个暗着的占位，提示"这里马上会开"
+    if (n < 2) this.drawNozzle(game, 1, true);
+  }
+
+  drawNozzle(game, idx, dormant) {
     const ctx = this.ctx;
-    const p = this.toScreen({ x: 0, y: NOZZLE_Y });
-    const c = PALETTE[game.nextCi];
+    const down = idx === 0;
+    const p = this.toScreen(NOZZLE_POS[idx]);
+    const c = PALETTE[game.nozzleCi[idx]];
     const charge = Math.min(1, game.beatClock / game.beat);
+    const dir = down ? 1 : -1;
 
     // 瞄准虚线
     ctx.save();
     ctx.setLineDash([4, 10]);
-    ctx.strokeStyle = 'rgba(150,200,255,0.13)';
+    ctx.strokeStyle = dormant ? 'rgba(150,200,255,0.05)' : 'rgba(150,200,255,0.13)';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
-    ctx.moveTo(p.x, p.y + 26);
-    ctx.lineTo(p.x, this.toScreen(IMPACT).y);
+    ctx.moveTo(p.x, p.y + 26 * dir);
+    ctx.lineTo(p.x, this.toScreen(IMPACT[idx]).y);
     ctx.stroke();
     ctx.restore();
 
-    // 炮体
+    // 炮体（梯形，朝落点方向收窄）
+    const h = 16 * dir;
     ctx.beginPath();
-    ctx.moveTo(p.x - 26, p.y - 16);
-    ctx.lineTo(p.x + 26, p.y - 16);
-    ctx.lineTo(p.x + 15, p.y + 16);
-    ctx.lineTo(p.x - 15, p.y + 16);
+    ctx.moveTo(p.x - 26, p.y - h);
+    ctx.lineTo(p.x + 26, p.y - h);
+    ctx.lineTo(p.x + 15, p.y + h);
+    ctx.lineTo(p.x - 15, p.y + h);
     ctx.closePath();
-    ctx.fillStyle = '#131A26';
+    ctx.fillStyle = dormant ? '#141D2B' : '#131A26';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(140,190,255,0.22)';
+    ctx.strokeStyle = dormant ? 'rgba(140,190,255,0.20)' : 'rgba(140,190,255,0.28)';
     ctx.lineWidth = 1.4;
     ctx.stroke();
 
     // 充能弧
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 34, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * charge);
-    ctx.strokeStyle = c.base;
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
-    ctx.stroke();
-    ctx.lineCap = 'butt';
+    if (!dormant) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 34, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * charge);
+      ctx.strokeStyle = c.base;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.lineCap = 'butt';
+    }
 
     // 待发球
+    const py = p.y - 2 * dir;
     ctx.beginPath();
-    ctx.arc(p.x, p.y + 2, 11, 0, Math.PI * 2);
-    const g = ctx.createRadialGradient(p.x - 4, p.y - 2, 2, p.x, p.y + 2, 12);
-    g.addColorStop(0, c.light);
-    g.addColorStop(1, c.base);
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
+    ctx.arc(p.x, py, 11, 0, Math.PI * 2);
+    if (dormant) {
+      ctx.fillStyle = 'rgba(60,80,110,0.35)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(140,190,255,0.14)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      // 锁定小锁
+      ctx.font = `600 10px ${MONO}`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(140,190,255,0.28)';
+      ctx.fillText(`${Math.ceil(CFG.nozzle2At - game.time)}s`, p.x, p.y + 4);
+      ctx.textAlign = 'left';
+    } else {
+      const g = ctx.createRadialGradient(p.x - 4, py - 2, 2, p.x, py, 12);
+      g.addColorStop(0, c.light);
+      g.addColorStop(1, c.base);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    }
   }
 
   // ---------- 特效 ----------
@@ -555,6 +627,33 @@ export class Renderer {
       ctx.fill();
     }
 
+    // 副喷头解锁倒计时
+    if (game.nozzleCount() < 2) {
+      const t = Math.max(0, CFG.nozzle2At - game.time);
+      ctx.textAlign = 'right';
+      ctx.font = `600 11px ${MONO}`;
+      ctx.fillStyle = 'rgba(140,190,255,0.42)';
+      ctx.fillText(`NOZZLE 2  ${t.toFixed(0)}s`, 1156, 214);
+    } else {
+      ctx.textAlign = 'right';
+      ctx.font = `600 11px ${MONO}`;
+      ctx.fillStyle = 'rgba(120,230,200,0.42)';
+      ctx.fillText('NOZZLE ×2', 1156, 214);
+    }
+
+    // 满载警告：跑道塞满时，下一颗落球就是死，必须让玩家看见
+    if (occ >= N) {
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.font = `800 30px ${FONT}`;
+      ctx.fillStyle = `rgba(255,80,100,${0.55 + 0.35 * Math.sin(this.t * 12)})`;
+      ctx.fillText('跑 道 已 满', CX, CY + 10);
+      ctx.font = `600 13px ${FONT}`;
+      ctx.fillStyle = `rgba(255,120,140,${0.4 + 0.3 * Math.sin(this.t * 12 + 1)})`;
+      ctx.fillText('接住一颗同色珠就能腾出空间', CX, CY + 40);
+      ctx.restore();
+    }
+
     // 连锁 / 提示
     ctx.textAlign = 'center';
     if (game.chain >= 2) {
@@ -587,57 +686,72 @@ export class Renderer {
 
   title() {
     const ctx = this.ctx;
-    this.veil(0.82);
+    this.veil(0.87);
     ctx.textAlign = 'center';
 
     ctx.font = `800 64px ${FONT}`;
     ctx.fillStyle = ink(0.96);
-    ctx.fillText('双轮彩球蛇', CX, 296);
+    ctx.fillText('双轮彩球蛇', CX, 194);
 
     ctx.font = `600 15px ${MONO}`;
     ctx.fillStyle = 'rgba(120,200,255,0.55)';
-    ctx.fillText('B I C Y C L E - C H A I N   R E V E R S E   Z U M A', CX, 332);
+    ctx.fillText('B I C Y C L E - C H A I N   R E V E R S E   Z U M A', CX, 234);
 
     ctx.font = `400 16px ${FONT}`;
     ctx.fillStyle = ink(0.55);
-    ctx.fillText('炮口按节拍自动抛球，你只能转轮盘。', CX, 400);
-    ctx.fillText('把要接的那颗珠转到落点上。', CX, 430);
+    ctx.fillText('两个炮口按节拍自动抛球，你只能转轮盘。', CX, 370);
+    ctx.fillText('它们相距半圈——你永远只能照顾好一边。', CX, 400);
 
     const pulse = 0.55 + 0.45 * Math.sin(this.t * 3);
     ctx.font = `700 18px ${FONT}`;
     ctx.fillStyle = `rgba(255,255,255,${pulse})`;
-    ctx.fillText('按 空格 开始', CX, 520);
+    ctx.fillText('按 空格 开始', CX, 618);
   }
 
   result(game, ui) {
     const ctx = this.ctx;
-    this.veil(0.86);
+    this.veil(0.70);
+
+    // 深色卡片：结算文字必须和背后的珠子隔开，否则读不清
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(CX - 310, 196, 620, 412, 20);
+    ctx.fillStyle = 'rgba(6,10,18,0.93)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(120,180,255,0.16)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+
     ctx.textAlign = 'center';
 
     const dead = game.deadReason === 'overflow';
     ctx.font = `800 30px ${FONT}`;
     ctx.fillStyle = dead ? '#FF6B7A' : ink(0.9);
-    ctx.fillText(dead ? '跑道塞满' : '时间到', CX, 250);
+    ctx.fillText(dead ? '跑道塞满' : '时间到', CX, 252);
 
     ctx.font = `600 12px ${FONT}`;
     ctx.fillStyle = ink(0.32);
-    ctx.fillText('FINAL SCORE', CX, 310);
+    ctx.fillText('FINAL SCORE', CX, 306);
     ctx.font = `800 72px ${MONO}`;
     ctx.fillStyle = ink(0.97);
-    ctx.fillText(String(game.score), CX, 380);
+    ctx.fillText(String(game.score), CX, 376);
 
     ctx.font = `600 15px ${FONT}`;
     ctx.fillStyle = ink(0.5);
-    ctx.fillText(`最长连锁 ×${[1, 2, 4, 8, 12][Math.min(Math.max(game.maxChain, 1) - 1, 4)]}　·　消除 ${game.clears} 次　·　发球 ${game.shots} 次`, CX, 440);
+    ctx.fillText(
+      `最长连锁 ${game.maxChain} 段　·　消除 ${game.clears} 次　·　落球 ${game.drops} 颗　·　吸附 ${game.snapped} 次`,
+      CX, 434
+    );
 
     ctx.font = `700 22px ${MONO}`;
     ctx.fillStyle = 'rgba(255,214,90,0.9)';
-    ctx.fillText(ui.rank, CX, 500);
+    ctx.fillText(ui.rank, CX, 490);
 
     const pulse = 0.5 + 0.5 * Math.sin(this.t * 3);
     ctx.font = `600 15px ${FONT}`;
     ctx.fillStyle = `rgba(255,255,255,${0.35 + pulse * 0.4})`;
-    ctx.fillText('按 空格 重开', CX, 570);
+    ctx.fillText('按 空格 重开', CX, 556);
   }
 
   paused() {

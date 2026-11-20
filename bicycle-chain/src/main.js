@@ -12,7 +12,7 @@ const params = new URLSearchParams(location.search);
 const seedParam = Number(params.get('seed'));
 
 const fx = { parts: [], floats: [] };
-const ui = { mode: 'title', t: 0, target: 10000, rank: '', deadAt: 0 };
+const ui = { mode: 'title', t: 0, target: 5500, rank: '', deadAt: 0 };
 // 调试用：?auto=1 直接开局，?seed=N 固定种子，?ff=秒 快进
 if (params.get('auto') === '1') ui.mode = 'play';
 
@@ -69,10 +69,23 @@ function handleEvents() {
 }
 
 // ---------- 主循环 ----------
+let lastNozzles = 1;
+
 function stepOnce() {
   game.setInput(dir());
   game.step(DT);
   handleEvents();
+
+  // 副喷头解锁：给一次明确的画面提示，否则玩家会莫名其妙多出一颗球
+  const n = game.nozzleCount();
+  if (n !== lastNozzles) {
+    lastNozzles = n;
+    if (n === 2) {
+      float('副 喷 头 激 活', 600, 690, 24, '#2FE6C8');
+      sfx.clear(3);
+    }
+  }
+
   if (Math.abs(game.v) > 1.5) sfx.tick(Math.abs(game.v));
 }
 
@@ -130,10 +143,10 @@ function frame(now) {
 }
 
 function rank(s) {
-  if (s >= 18000) return 'RANK  SS';
-  if (s >= 13000) return 'RANK  S';
-  if (s >= 8000) return 'RANK  A';
-  if (s >= 5000) return 'RANK  B';
+  if (s >= 8000) return 'RANK  SS';
+  if (s >= 6200) return 'RANK  S';
+  if (s >= 4500) return 'RANK  A';
+  if (s >= 2800) return 'RANK  B';
   return 'RANK  C';
 }
 
@@ -146,6 +159,7 @@ function restart() {
   fx.floats.length = 0;
   acc = 0;
   paused = false;
+  lastNozzles = 1;
   ui.mode = 'play';
   ui.rank = '';
 }
@@ -198,7 +212,7 @@ document.addEventListener('visibilitychange', () => {
 // 调试用快进：截图中局状态
 const ff = Number(params.get('ff') || 0);
 if (ff > 0) {
-  const n = Math.min(Math.floor(ff / DT), 120 * 60);
+  const n = Math.min(Math.floor(ff / DT), 120 * 90);
   for (let i = 0; i < n; i++) {
     game.setInput(0);
     game.step(DT);
@@ -206,7 +220,10 @@ if (ff > 0) {
   }
   fx.parts.length = 0;
   fx.floats.length = 0;
+  lastNozzles = game.nozzleCount();
   sfx.muted = true;
+  // headless 截图时 rAF 可能只跑几帧，等不到 0.8s 的死亡延迟，直接切结算
+  if (game.dead) { ui.rank = rank(game.score); ui.mode = 'result'; }
 }
 
 requestAnimationFrame(frame);
