@@ -44,17 +44,22 @@ export function botInput(game) {
     ? CFG.flightTime - game.balls[0].t
     : (game.beat - game.beatClock) + CFG.flightTime);
 
-  // 阻尼解析积分：v(t) = drift + (v-drift)e^{-kt}
-  const k = CFG.dampK, drift = CFG.drift;
-  const coast = drift * T + (game.v - drift) * (1 - Math.exp(-k * T)) / k;
-  let err = bestPhase - (game.phase + coast);
-  while (err > N / 2) err -= N;
-  while (err < -N / 2) err += N;
-
   // 发射后收手：飞行期间不再改向，边飞边改会把自己的落点带偏。
   if (game.balls.length) return 0;
 
-  const nv = Math.max(-CFG.vMax, Math.min(CFG.vMax, drift + err / T));
+  let gap = bestPhase - game.phase;
+  while (gap > N / 2) gap -= N;
+  while (gap < -N / 2) gap += N;
+
+  // 精确反解：求 v 使 coast(v,T) = gap。
+  // coast(v,T) = drift·T + (v−drift)·(1−e^{−kT})/k  ⇒  v = drift + (gap − drift·T)·k/(1−e^{−kT})
+  //
+  // 以前用的是 `nv = drift + err/T` 这个一阶近似。它把 drift 当成了"基础推进力"，
+  // 所以一旦把 drift 调小，机器人会跟着变笨——那是控制律的缺陷，不是游戏变难。
+  // 拉长 flightTime 后 T 变大，近似误差被放大到无法忽略（实测标准模式爆仓 10/12）。
+  const k = CFG.dampK, drift = CFG.drift;
+  const decay = 1 - Math.exp(-k * T);
+  const nv = Math.max(-CFG.vMax, Math.min(CFG.vMax, drift + (gap - drift * T) * k / decay));
   if (nv > game.v + 0.45) return 1;
   if (nv < game.v - 0.45) return -1;
   return 0;
