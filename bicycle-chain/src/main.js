@@ -1,4 +1,4 @@
-import { Game } from './sim.js';
+import { Game, BASE_CFG } from './sim.js';
 import { Renderer, arcToScreen } from './render.js';
 import { Sfx } from './audio.js';
 import { MODES, modeIndex, TIERS, scoreBand } from './modes.js';
@@ -17,6 +17,12 @@ const ffParam = Number(params.get('ff') || 0);
 // ?bot=1 交给机器人操作。它不只是调试开关：无头截图要靠它才截得到真实中高分段，
 // 否则空转快进会在十几秒内塞满跑道，永远只截到 C 段。
 const botOn = params.get('bot') === '1';
+// ?ft=秒 覆盖飞行时长（0.2~1.4）。
+// 这个参数存在的理由：0.80s 是推算出来的，不是测出来的——合成速度进了人眼
+// 舒适区，但"多少秒最舒服"只有上手才知道。改 BASE_CFG 而不是 CFG，是因为
+// 每次 new Game 都会用 Object.assign(CFG, BASE_CFG, mode.cfg) 重置。
+const ftParam = Number(params.get('ft') || 0);
+if (ftParam > 0) BASE_CFG.flightTime = Math.max(0.2, Math.min(1.4, ftParam));
 
 // ---------- 本地记录 ----------
 const BEST_KEY = 'bcj.best.v2';
