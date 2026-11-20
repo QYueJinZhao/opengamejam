@@ -1,4 +1,6 @@
-import { Game, CFG, BASE_CFG, WILD, BOMB, ballSkin, COMBO_TIERS, TEMPO_MARKS, comboTierIndex } from './sim.js';
+import { Game, CFG, BASE_CFG, WILD, BOMB, RUST, ballSkin, rulesOf, COMBO_TIERS, TEMPO_MARKS, comboTierIndex } from './sim.js';
+import { PIPS, isPip, pipIndex, isFlipDie } from './dice.js';
+import { cardSkin } from './poker.js';
 import { Renderer, arcToScreen } from './render.js';
 import { Sfx } from './audio.js';
 import { MODES, modeIndex, TIERS, scoreBand } from './modes.js';
@@ -75,6 +77,19 @@ const PART_RGB = {
   12: '150,140,125', // 锈
 };
 
+/** 骰子模式：ci → 粒子颜色。翻面骰（20..25）按点数取色。 */
+function partRgb(ci) {
+  // 扑克的粒子跟着花色走：红心炸出红色、黑桃炸出青色——
+  // 这样"我刚消的是哪一种牌"在碎片层也读得出来。
+  if (rulesOf() === 'poker') return hexRgb(cardSkin(ci).base);
+  if (isPip(ci)) {
+    const hex = PIPS[pipIndex(ci)].base;
+    const n = parseInt(hex.slice(1), 16);
+    return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+  }
+  return PART_RGB[ci] || '255,255,255';
+}
+
 // 档位颜色是十六进制字符串，而粒子/冲击波要的是 "r,g,b" 片段。
 // 这个转换看着琐碎，但它让"档位只定义一次颜色"成立——否则每加一档，
 // 都要在浮字、冲击波、粒子三处各写一遍 rgb。
@@ -84,7 +99,7 @@ function hexRgb(hex) {
 }
 
 function burst(x, y, ci, count = 9, power = 1, rgbOverride = null) {
-  const rgb = rgbOverride || PART_RGB[ci] || '255,255,255';
+  const rgb = rgbOverride || partRgb(ci);
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2;
     const sp = (44 + Math.random() * 196) * power;
@@ -138,7 +153,8 @@ function handleEvents() {
       // 消除长度决定这一下的颜色：3 连冷白、4 连琥珀、5 连紫。
       // 这是"我这一下值钱"的第一个信号——它比浮字早到，而且贴着轨道，
       // 玩家盯着炮口时余光也能看见。
-      const rank = e.len >= CFG.rewardWildAt ? 2 : e.len >= CFG.rewardBombAt ? 1 : 0;
+      const ml = e.matchLen ?? e.len;
+      const rank = ml >= CFG.rewardWildAt ? 2 : ml >= CFG.rewardBombAt ? 1 : 0;
       const gold = e.chain >= 2 || e.combo >= 6;
       const tint =
         rank === 2 ? 'rgba(199,125,255,ALPHA)' :
@@ -158,16 +174,47 @@ function handleEvents() {
       }
 
       float(`+${e.gain}`, mid.x, mid.y - 30, e.chain >= 2 ? 32 : 26, e.chain >= 2 ? '#FFD65A' : '#E8F0FA');
+      // 骰子 / 扑克：这一下是"豹子 / 同花顺"还是"大顺子"，比分数更该被看见。
+      // 因为它回答的是"我做了什么"，而不是"我赚了多少"——前者才能被学会。
+      // 几种加成可能同时出现（牌型 + 筹码 + 狂热 + 连锁），所以纵向位置
+      // 用一条游标往下排，而不是各自写死一个 y——写死会在满加成时叠成重影。
+      let fy = mid.y - 60;
+      if (e.kind) {
+        float(e.label, mid.x, fy, e.jackpot ? 24 : 19, e.color || '#9BE9FF');
+        fy -= 24;
+      }
+      if (e.dbl > 1) {
+        float('×2 镀金', mid.x, fy, 17, '#FFD65A');
+        fy -= 24;
+      }
+      if (e.chip > 1) {
+        float('筹码 ×2', mid.x, fy, 17, '#FFD65A');
+        fy -= 24;
+      }
+      if (e.frenzyMult > 1) {
+        float('狂热 ×2', mid.x, fy, 17, '#FF9A5C');
+        fy -= 24;
+      }
       if (e.chain >= 2) {
-        float(`连锁 ×${e.chainMult.toFixed(1)}`, mid.x, mid.y - 64, 18, '#FFD65A');
+        float(`连锁 ×${e.chainMult.toFixed(1)}`, mid.x, fy, 18, '#FFD65A');
+        fy -= 24;
       }
       if (e.comboMult >= 1.9) {
-        float(`连消 ×${e.comboMult.toFixed(2)}`, mid.x, mid.y - 88, 17, '#9BE9FF');
+        float(`连消 ×${e.comboMult.toFixed(2)}`, mid.x, fy, 17, '#9BE9FF');
+      }
+      if (e.jackpot) {
+        // 六六六只可能发生一次，值得用整屏的动静。
+        fx.flash = Math.min(0.5, fx.flash + 0.26);
+        fx.shake = Math.min(34, fx.shake + 12);
+        for (let i = 0; i < 14; i++) {
+          const a = (i / 14) * Math.PI * 2;
+          burst(mid.x + Math.cos(a) * 90, mid.y + Math.sin(a) * 60, -1, 3, 1.3, '255,214,90');
+        }
       }
 
       fx.shake = Math.min(30, fx.shake + 2.2 + e.chain * 2.4 + Math.min(6, e.combo * 0.3) + rank * 3);
       fx.flash = Math.min(0.5, fx.flash + 0.03 + e.chain * 0.02 + rank * 0.05);
-      if (!silent) sfx.clear(e.chain, e.combo, rank);
+      if (!silent) sfx.clear(e.chain, e.combo, e.jackpot ? 3 : rank, e.kind, e.matchLen);
     } else if (e.type === 'bomb') {
       // 爆破球：演出必须比三消更"钝"。三消是清脆的（光带 + 琶音），
       // 爆破是低频的（大冲击波 + 慢闪 + 闷响），两者靠质感区分而不是靠音量。
@@ -184,6 +231,59 @@ function handleEvents() {
       fx.flash = Math.min(0.46, fx.flash + 0.12);
       if (e.hit > 0) float(`爆破 +${e.gain}`, p.x, p.y - 34, 26, '#FFB44A');
       if (!silent) sfx.boom();
+    } else if (e.type === 'padplus') {
+      // 骰子被翻面槽 +1：这一下必须"看得见地改了数"，否则玩家只会觉得点数乱跳
+      const p = arcToScreen(mod(e.slot + game.phase, N) * D);
+      shock(p.x, p.y, 4, 30, 0.34, 'rgba(120,235,255,ALPHA)', 2.4);
+      float(`翻面 → ${e.pip}`, p.x, p.y - 34, 17, '#78EBFF');
+      if (!silent) sfx.flipPad();
+    } else if (e.type === 'padx2') {
+      const p = arcToScreen(mod(e.slot + game.phase, N) * D);
+      shock(p.x, p.y, 5, 34, 0.38, 'rgba(255,214,90,ALPHA)', 2.6);
+      float('镀金 ×2', p.x, p.y - 34, 16, '#FFD65A');
+      if (!silent) sfx.reward(false);
+    } else if (e.type === 'flipdice') {
+      const p = arcToScreen(e.s);
+      shock(p.x, p.y, 6, 60, 0.42, 'rgba(120,235,255,ALPHA)', 2.6);
+      float(`翻面骰 → ${e.pip}`, p.x, p.y - 30, 16, '#78EBFF');
+      if (!silent) sfx.flipPad();
+    } else if (e.type === 'shiftsuit') {
+      // 染花牌：左右邻真的变成了同一花色。浮字必须写出是哪个花色，
+      // 否则玩家只看到两张牌闪了一下，不知道规则做了什么。
+      const p = arcToScreen(e.s);
+      shock(p.x, p.y, 5, 52, 0.4, 'rgba(126,217,87,ALPHA)', 2.4);
+      float(`染花 → ${e.sym}`, p.x, p.y - 30, 16, '#7ED957');
+      if (!silent) sfx.flipPad();
+    } else if (e.type === 'hold' || e.type === 'holdswap') {
+      // 底牌槽的操作反馈贴在炮口外侧，因为那是玩家正在看的位置。
+      const p = arcToScreen(mod(e.off + game.phase, N) * D);
+      float(e.type === 'hold' ? '底牌暂存' : '底牌换出', p.x, p.y - 46, 16, '#FFD65A');
+      shock(p.x, p.y, 4, 28, 0.28, 'rgba(255,214,90,ALPHA)', 2);
+      if (!silent) sfx.select();
+    } else if (e.type === 'frenzy') {
+      // 同花顺点火：整屏只在这一刻亮一下，然后进入持续 7 秒的边缘呼吸光。
+      fx.flash = Math.min(0.5, fx.flash + 0.16);
+      fx.shake = Math.min(34, fx.shake + 10);
+      float(`狂热 ×${(e.mult || 2).toFixed(1)}  ${e.add > 0 ? `+${e.add.toFixed(0)}s` : ''}`, 600, 340, 26, '#FFB45A');
+      if (!silent) sfx.tierUp(3);
+    } else if (e.type === 'blank') {
+      const p = arcToScreen(e.s);
+      shock(p.x, p.y, 3, 22, 0.3, 'rgba(150,140,125,ALPHA)', 2);
+      float(game.rules === 'poker' ? '暗牌' : '铅骰', p.x, p.y - 26, 13, 'rgba(198,188,174,0.9)');
+      if (!silent) sfx.clank();
+    } else if (e.type === 'sync') {
+      // 双响同点：两台炮同时换上最该打的点数。位置贴在画面中心，
+      // 因为这是"机器给的一次福利"，属于全局事件，不属于某一块盘面。
+      float(`双响同点 · ${e.pip}`, 600, 620, 20, '#2FE6C8');
+      for (const off of e.offs) {
+        const p = arcToScreen(mod(off + game.phase, N) * D);
+        shock(p.x, p.y, 4, 46, 0.45, 'rgba(47,230,200,ALPHA)', 2.4);
+      }
+      if (!silent) sfx.confirm();
+    } else if (e.type === 'bonus') {
+      // 续时：写在计时器右边，属于仪表盘读数，不抢画面中心
+      float(`续时 +${e.add.toFixed(1)}s`, 300, 236, 17, '#78EBFF');
+      if (!silent) sfx.tempoMark(1);
     } else if (e.type === 'rust') {
       const p = arcToScreen(e.s);
       shock(p.x, p.y, 3, 26, 0.34, 'rgba(150,140,125,ALPHA)', 2);
@@ -229,6 +329,9 @@ function handleEvents() {
       const wild = e.ci === WILD;
       const c = ballSkin(e.ci);
       const rgb = wild ? '199,125,255' : '255,150,60';
+      const rewardName = game.rules === 'poker'
+        ? (wild ? '小丑牌' : 'A 炸弹')
+        : (wild ? '彩虹万能' : '爆破球');
       // p 是**轨道上**的落点，不是炮口。往上 37px 正好越过链条外沿
       // （链条半宽约 27px），又远没到炮口——炮口在 125px 外，那里是炮管，
       // 字压上去会读成"炮管上的标签"。所以浮字贴在环带外侧的空白处。
@@ -238,7 +341,7 @@ function handleEvents() {
       // 炮管是竖的，正上方 50px 就是挂板，垂直方向没有位置可放。
       // 所以文字往**画面中心**偏：左炮往右、右炮往左，落点都是两炮之间的空地。
       const dx = p.x < 600 ? 78 : -78;
-      float(wild ? '彩虹万能' : '爆破球', cx + dx, cy + 4, wild ? 23 : 20, wild ? '#C77DFF' : '#FF9A4A');
+      float(rewardName, cx + dx, cy + 4, wild ? 23 : 20, wild ? '#C77DFF' : '#FF9A4A');
       if (!silent) sfx.reward(wild);
     } else if (e.type === 'tempo') {
       // 节奏里程碑。位置放在左侧读表盘下面，不放画面中心：
@@ -434,6 +537,23 @@ function startRun(idx) {
   sfx.startMusic();
 }
 
+/**
+ * 标题页换模式时**重建盘面**。
+ *
+ * 一开始只是改 ui.sel，结果标题背景永远是上一个模式：选到骰子关，后面站的
+ * 还是四色球。这不只是不好看——`ballSkin` 是按当前规则族解析的，
+ * 盘面和图鉴会各自按不同的规则上色，玩家看到的是两个模式的混合体。
+ * 重建的代价只有一次数组分配，换来的是"选什么就看到什么"。
+ */
+function previewMode(idx) {
+  if (idx === ui.sel && ui.mode === 'title') return;
+  ui.sel = (idx + MODES.length) % MODES.length;
+  if (ui.mode !== 'title') return;
+  game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id);
+  resetFx();
+  lastNozzles = game.nozzleCount();
+}
+
 function toTitle() {
   ui.mode = 'title';
   paused = false;
@@ -457,17 +577,23 @@ window.addEventListener('keydown', (e) => {
     sfx.select();
     return;
   }
+  if (e.code === 'KeyE') {
+    // 底牌暂存槽只在扑克模式有。holdNext 自己会检查 CFG.holdEnabled，
+    // 音效统一在 handleEvents() 中由 hold / holdswap 事件播放，避免双响。
+    if (ui.mode === 'play' && !paused) game.holdNext();
+    return;
+  }
 
   if (ui.mode === 'title') {
     if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
-      ui.sel = (ui.sel + MODES.length - 1) % MODES.length;
+      previewMode(ui.sel - 1);
       sfx.select();
     } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
-      ui.sel = (ui.sel + 1) % MODES.length;
+      previewMode(ui.sel + 1);
       sfx.select();
-    } else if (/^Digit[1-4]$/.test(e.code)) {
+    } else if (/^Digit[1-9]$/.test(e.code)) {
       const i = Number(e.code.slice(5)) - 1;
-      if (i < MODES.length) { ui.sel = i; sfx.select(); }
+      if (i < MODES.length) { previewMode(i); sfx.select(); }
     } else if (e.code === 'Space' || e.code === 'Enter') {
       startRun(ui.sel);
     }
@@ -488,10 +614,20 @@ window.addEventListener('keydown', (e) => {
 
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 
-window.addEventListener('pointerdown', () => {
+window.addEventListener('pointerdown', (e) => {
   sfx.init();
+  // 右键 = 底牌暂存（和 E 同一个动作）。左键继续负责开始 / 重开。
+  if (e.button === 2) {
+    if (ui.mode === 'play' && !paused) game.holdNext();
+    return;
+  }
   if (ui.mode === 'title') startRun(ui.sel);
   else if (ui.mode === 'result') startRun(ui.sel);
+});
+
+// 右键要用来操作底牌槽，所以扑克模式下必须吃掉浏览器菜单。
+window.addEventListener('contextmenu', (e) => {
+  if (ui.mode === 'play' && game.rules === 'poker') e.preventDefault();
 });
 
 window.addEventListener('blur', () => {
@@ -535,6 +671,13 @@ if (ffParam > 0) {
   // ?pause=1 冻结在快进结束的那一帧。截图校验构图时用：飞行只有 1.3 秒，
   // 靠 virtual-time 撞帧撞不到，而"球到底从哪儿起飞、飞到哪"必须看静态帧才说得清。
   if (params.get('pause') === '1') paused = true;
+
+  // ?held=1 扣一张底牌并冻结：截图校验 HOLD 面板的"有牌"状态。
+  // 注意不能叫 ?hold=，那个参数已经被"把球钉在飞行进度"占用了。
+  if (params.get('held') === '1') {
+    game.holdNext();
+    paused = true;
+  }
 
   // ?hold=0.5 强制出一颗球并把它钉在飞行进度的 50%。飞行只有 1.3 秒，
   // 靠快进秒数去撞"球在空中"这一帧，撞十次有七次落空；构图校验要的是确定帧。

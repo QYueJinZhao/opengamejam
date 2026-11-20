@@ -26,7 +26,9 @@ function randomInput(frame, seed) {
 
 function runOne(modeId, seed, policy) {
   const g = new Game(seed, modeId);
-  const maxFrames = Math.ceil(CFG.levelTime / DT) + 240;
+  // +timeBonusCap：骰子模式的连消会续时，一局可以比 levelTime 长 20 多秒。
+  // 不加上这一项，那些"活到最后"的局会因为循环提前结束而被算成"没死也没活"。
+  const maxFrames = Math.ceil((CFG.levelTime + (CFG.timeBonusCap || 0)) / DT) + 240;
   for (let frame = 0; frame < maxFrames; frame++) {
     let held = 0;
     if (policy === 'aim') held = botInput(g);
@@ -89,7 +91,7 @@ function skillGap(mode) {
       for (let q = 0; q < N; q++) {
         let sc = 0;
         for (let k = 0; k < e.colors.length; k++) {
-          sc += evalSlot(at, mod(-q + e.offs[k], N), e.colors[k]);
+          sc += evalSlot(at, mod(-q + e.offs[k], N), e.colors[k], g.rules);
         }
         sum += sc;
         if (sc > best) best = sc;
@@ -117,7 +119,7 @@ function ladder(mode, n = 10) {
     for (let s = 0; s < n; s++) {
       const g = new Game(9500 + s * 71, mode.id);
       const h = human ? makeHuman(s * 13 + 5, { scan: 0.22 }) : null;
-      for (let f = 0; f < Math.ceil(CFG.levelTime / DT) + 240; f++) {
+      for (let f = 0; f < Math.ceil((CFG.levelTime + (CFG.timeBonusCap || 0)) / DT) + 240; f++) {
         g.setInput(h ? h(g, DT) : botInput(g));
         g.step(DT);
         g.drainEvents();

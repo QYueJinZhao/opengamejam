@@ -221,6 +221,13 @@ export class Sfx {
 
   click() { this.tone({ freq: 470, to: 300, dur: 0.05, type: 'triangle', gain: 0.08 }); }
 
+  /** 翻面槽 / 翻面骰：一声"拨片弹过去"的上滑 + 骰子落桌 */
+  flipPad() {
+    this.tone({ freq: 620, to: 1180, dur: 0.075, type: 'square', gain: 0.045 });
+    this.noise({ dur: 0.045, gain: 0.05, freq: 3600, q: 1.1, at: 0.03 });
+    this.tone({ freq: 240, to: 180, dur: 0.06, type: 'triangle', gain: 0.05, at: 0.05 });
+  }
+
   /** 爆破球：低频下坠 + 一层宽噪，要"闷"不要"脆"——脆会读成消除音 */
   boom() {
     this.tone({ freq: 96, to: 34, dur: 0.36, type: 'sine', gain: 0.30 });
@@ -243,8 +250,82 @@ export class Sfx {
 
   beat() { this.tone({ freq: 90, to: 64, dur: 0.08, type: 'sine', gain: 0.08 }); }
 
-  /** 消除：chain 决定音高，rush 决定叠加的亮度 */
-  clear(chain = 1, rush = 1, rank = 0) {
+  /**
+   * 消除：chain 决定音高，rush 决定叠加的亮度。
+   *
+   * 骰子模式多传 kind / len，走两条完全不同的音型——这不是音色差异，是**信息**：
+   *   豹子（same）——一声闷响 + 骰子落桌的硬碰撞。三颗同点没有方向，所以是"一个点"。
+   *   顺子（run） —— 按点数逐个上行，几点就几个音。玩家闭着眼也能听出自己消了几连顺。
+   * 这是整个项目里唯一一处"用音高直接映射游戏量"的地方，值得为它单开分支。
+   */
+  clear(chain = 1, rush = 1, rank = 0, kind = null, len = 3) {
+    // ---- 扑克：四种牌型四条音型 ----
+    // 同花顺是一串上行 + 长尾；同花是三音和弦；三条是"三下同音"；
+    // 顺子是逐级上行。玩家闭着眼也能听出这一下是哪种牌型。
+    if (kind === 'straightflush') {
+      [0, 0.07, 0.14, 0.22, 0.32].forEach((at, i) => {
+        this.tone({ freq: PENTA[(i + 1) % PENTA.length] * (i >= 3 ? 2 : 1.5), dur: 0.30, type: 'sine', gain: 0.085, at });
+      });
+      this.noise({ dur: 0.42, gain: 0.06, freq: 7200, q: 0.6, at: 0.06 });
+      this.tone({ freq: 88, to: 60, dur: 0.4, type: 'sine', gain: 0.12 });
+      return;
+    }
+    if (kind === 'flush') {
+      const root = PENTA[Math.min(5, Math.max(0, len - 1))];
+      [1, 1.25, 1.5].forEach((mul, i) => {
+        this.tone({ freq: root * mul, dur: 0.24, type: 'triangle', gain: 0.075 - i * 0.01, at: i * 0.035 });
+      });
+      this.noise({ dur: 0.10, gain: 0.04, freq: 5200, q: 0.8 });
+      return;
+    }
+    if (kind === 'three') {
+      // 三条 = 同一个音敲三下，长度越多越沉。它没有方向，所以不用音阶。
+      const f = PENTA[Math.min(4, Math.max(0, len - 1))];
+      for (let i = 0; i < 3; i++) this.tone({ freq: f, dur: 0.09, type: 'square', gain: 0.055, at: i * 0.045 });
+      this.tone({ freq: 150, to: 88, dur: 0.2, type: 'sine', gain: 0.16 });
+      return;
+    }
+    if (kind === 'straight') {
+      const n = Math.max(3, Math.min(5, len | 0));
+      const base = PENTA[Math.min(3, Math.max(0, chain - 1))] * 0.8;
+      for (let i = 0; i < n; i++) {
+        this.tone({ freq: base * Math.pow(2, i / 8), dur: 0.14, type: 'triangle', gain: 0.07, at: i * 0.05 });
+      }
+      this.noise({ dur: 0.05, gain: 0.05, freq: 3000, q: 0.9 });
+      return;
+    }
+
+    if (kind === 'same') {
+      this.tone({ freq: 150, to: 82, dur: 0.20, type: 'sine', gain: 0.20 });
+      this.noise({ dur: 0.075, gain: 0.10, freq: 2200, q: 0.9 });
+      this.tone({ freq: 440, to: 660, dur: 0.10, type: 'triangle', gain: 0.045, at: 0.03 });
+      if (rank >= 3) {
+        // 六六六：一声钟 + 一层上行泛音，和任何常规消除都不同类
+        [0, 0.09, 0.18, 0.30].forEach((at, i) => {
+          this.tone({ freq: PENTA[i + 2] * 2, dur: 0.42, type: 'sine', gain: 0.085, at });
+        });
+        this.noise({ dur: 0.42, gain: 0.05, freq: 7200, q: 0.6, at: 0.05 });
+      }
+      return;
+    }
+    if (kind === 'run') {
+      const n = Math.max(3, Math.min(6, len | 0));
+      const ci0 = Math.min(Math.max(chain, 1) - 1, PENTA.length - 1);
+      const base = PENTA[ci0] * 0.75;
+      for (let i = 0; i < n; i++) {
+        // 顺子本来就是"一级一级走"，所以音程用半音而不是五声音阶——
+        // 五声音阶会把 6 个音压成 5 个台阶，听起来像"差一点点"。
+        this.tone({
+          freq: base * Math.pow(2, i / 6),
+          dur: 0.14, type: 'triangle', gain: 0.075 - i * 0.005, at: i * 0.045,
+        });
+      }
+      this.noise({ dur: 0.05, gain: 0.055, freq: 2600, q: 0.9 });
+      if (n >= 5) {
+        this.tone({ freq: base * 3, dur: 0.30, type: 'sine', gain: 0.05, at: n * 0.045 });
+      }
+      return;
+    }
     const i = Math.min(Math.max(chain, 1) - 1, PENTA.length - 1);
     const f = PENTA[i];
     // 尾音跟着视觉一起拉长（0.16→0.24）。三消演出到了 0.7s，

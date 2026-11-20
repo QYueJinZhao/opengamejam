@@ -8,6 +8,10 @@
 //   rand    —— 随机按，下限探针。
 
 import { CFG, PALETTE, WILD, BOMB } from './sim.js';
+import { isPip, pipOf, evalPlacement } from './dice.js';
+import {
+  isPokerCard, cardCi, evalPlacement as evalCardPlacement,
+} from './poker.js';
 import { N, mod } from './geom.js';
 
 /** 一个槽位对某色的收益：贴边 30、隔一 12、夹心 80、同色叠 15 */
@@ -29,8 +33,55 @@ function evalColor(at, k, ci) {
  * 一个槽位对某颗待发球的收益。
  * 特殊球没有颜色，必须有自己的评估函数——否则机器人会把万能球当"无色的球"
  * 随便丢，把炸弹丢到空跑道上，然后测试跑出来的分数就不是"玩家能打的分数"。
+ *
+ * `rules` 决定用哪套语言：基础模式算"同色相邻"，骰子模式算"牌型能接多长"。
+ * 两套评分不需要互相可比——它们各自只在自己的模式里排序。
  */
-export function evalSlot(at, k, ci) {
+export function evalSlot(at, k, ci, rules = 'color') {
+  if (rules === 'poker') {
+    if (isPokerCard(ci)) {
+      // 小丑牌落地后仍是万能：取 20 张牌里最好的落点收益，打九折——
+      // 它比手里攥着的那张真牌弱一点，因为牌型要等它落地才成立。
+      if (ci === WILD) {
+        let best = -1e9;
+        for (let rank = 0; rank < 5; rank++) {
+          for (let suit = 0; suit < 4; suit++) {
+            best = Math.max(best, evalCardPlacement(at, N, k, cardCi(rank, suit), at(k) !== null));
+          }
+        }
+        return best * 0.9;
+      }
+      // 爆破王牌按 A 计，花色任意：取四种花色里最好的那一种。
+      if (ci === BOMB) {
+        let best = -1e9;
+        for (let suit = 0; suit < 4; suit++) {
+          best = Math.max(best, evalCardPlacement(at, N, k, cardCi(4, suit), at(k) !== null));
+        }
+        return best;
+      }
+      return evalCardPlacement(at, N, k, ci, at(k) !== null);
+    }
+    return -80;   // 暗牌：谁都不想要，但要让它"有地方可去"，不能是 -inf
+  }
+
+  if (rules === 'dice') {
+    if (isPip(ci)) return evalPlacement(at, N, k, ci, at(k) !== null);
+    if (ci === WILD) {
+      let best = -1e9;
+      for (let pip = 0; pip < 6; pip++) {
+        best = Math.max(best, evalPlacement(at, N, k, pip, at(k) !== null));
+      }
+      // 打九折：金骰落地才定型，比手里就攥着的真点数弱一点
+      return best * 0.9;
+    }
+    if (ci === BOMB) {
+      let n = 0;
+      for (let i = -2; i <= 2; i++) if (at(k + i)) n++;
+      return n * 26;
+    }
+    return -80;   // 铅骰：谁都不想要，但要让它"有地方可去"，不能是 -inf
+  }
+
   if (ci === BOMB) {
     let n = 0;
     for (let i = -2; i <= 2; i++) if (at(k + i)) n++;
@@ -86,6 +137,34 @@ function steer(game, targetPhase) {
 }
 
 /**
+ * 一个落点值多少（含主动槽）。oracle 与人类模型共用这一份，
+ * 否则两边会悄悄对"镀金槽到底值不值得打"给出不同答案。
+ *
+ * 槽位加分是**故意做得很直白**的：镀金 +55、翻面 +40。
+ * 这两个数不参与平衡，只影响机器人优先选哪个落点；
+ * 把它们写成 0 的话，机器人会永远绕开槽位，测出来的段位线就会
+ * 系统性低估"会用槽的玩家"能打到多少分。
+ */
+/** 最近一次决策的目标相位（诊断用：快进截图/无头测试可以读它看"它想去哪"）。 */
+export let lastAim = 0;
+let aimQ = 0;
+let aimShot = -1;
+
+function scoreSlot(game, at, k, ci) {
+  let sc = evalSlot(at, k, ci, game.rules);
+  const pad = game.padAt ? game.padAt(k) : null;
+  if (!pad) return sc;
+  if (game.rules === 'poker') {
+    // 筹码槽的回报在"整段牌型"上，落点本身只值一点点——
+    // 给 45 是让机器人愿意把关键牌送进槽，但不会为了槽放弃一个更大的牌型。
+    if (isPokerCard(ci)) sc += 45;
+    return sc;
+  }
+  if (isPip(ci)) sc += pad.kind === 'x2' ? 55 : 40;
+  return sc;
+}
+
+/**
  * 返回本帧应该按住的转向：1 / 0 / -1
  *
  * 瞄的是**这一颗**，不是"下一发"。volleyIndex 在 fire() 里先取后进，球一出膛
@@ -96,17 +175,50 @@ function steer(game, targetPhase) {
 export function botInput(game) {
   const at = (j) => game.slots[mod(j, N)];
   const flying = flyingBall(game);
+
+  // ---- 目标锁定 ----
+  //
+  // 一开始是每帧重算目标，结果机器人整场只有 38% 落在自己想去的地方。
+  // 原因不是控制律，是**目标在飞行途中漂移**：可达窗口 reach 随剩余时间收缩，
+  // 越接近落地，远处的目标越容易被判成"够不到"，于是它临阵改打附近的次优落点，
+  // 最终落在两个目标之间。人类不会这样——人一旦把球瞄向某个缝，就不会在最后
+  // 0.1 秒改主意，因为改也来不及。
+  //
+  // 所以这里显式建模"承诺"：一颗球只决策一次（开火那一帧），之后只跟踪。
+  // 这让机器人更像一个高水平玩家，而不是一个每帧都反悔的优化器。
+  if (!flying) {
+    aimShot = -1;
+  } else if (game.shots !== aimShot) {
+    aimShot = game.shots;
+  } else {
+    lastAim = aimQ;
+    return steer(game, aimQ);
+  }
+
   const colors = flying ? [flying.ci] : game.nextVolley().map((i) => game.queues[i][0]);
   const offs = flying ? [flying.off] : game.nextVolley().map((i) => game.nozzleOff[i]);
 
+  const T = flying
+    ? Math.max(0.10, game.flightLeft())
+    : Math.max(0.30, (game.beat - game.beatClock) + game.flightDur);
+  const reach = Math.min(N / 2, CFG.vMax * T * 0.94 + 0.6);
+
   let bestPhase = 0, bestSc = -1e9;
   for (let q = 0; q < N; q++) {
+    let gap = q - game.phase;
+    while (gap > N / 2) gap -= N;
+    while (gap < -N / 2) gap += N;
     let sc = 0;
     for (let k = 0; k < offs.length; k++) {
-      sc += evalSlot(at, mod(-q + offs[k], N), colors[k]);
+      sc += scoreSlot(game, at, mod(-q + offs[k], N), colors[k]);
     }
+    // 够不到的目标不是"差一点"，是"这一发废了"：压到最低但保留一点点分数，
+    // 让它在全盘都够不到时仍有一个确定的最近目标可回退。
+    if (Math.abs(gap) > reach) sc -= 10000;
     if (sc > bestSc) { bestSc = sc; bestPhase = q; }
   }
+  aimQ = bestPhase;
+  lastAim = bestPhase;
   return steer(game, bestPhase);
 }
 
@@ -158,7 +270,7 @@ export function makeHuman(seed, { lag = 0.28, scan = 0.09 } = {}) {
       for (let i = 0; i < budget; i++) {
         const d = i === 0 ? 0 : (i % 2 ? 1 : -1) * Math.ceil(i / 2);
         const q = mod(k0 + d, N);
-        const sc = evalSlot(at, mod(-q + off, N), ci);
+        const sc = scoreSlot(game, at, mod(-q + off, N), ci);
         if (sc > best) { best = sc; bestQ = q; }
       }
       // 手抖：1/8 的机会差一格。连续转向里人几乎无法精确停在某一格，
