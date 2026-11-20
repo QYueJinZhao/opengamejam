@@ -1,7 +1,8 @@
 import { Game } from './sim.js';
 import { Renderer, arcToScreen } from './render.js';
 import { Sfx } from './audio.js';
-import { MODES, modeIndex } from './modes.js';
+import { MODES, modeIndex, TIERS, scoreBand } from './modes.js';
+import { botInput } from './bot.js';
 import { D, N } from './geom.js';
 
 const DT = 1 / 120;
@@ -13,6 +14,9 @@ const sfx = new Sfx();
 const params = new URLSearchParams(location.search);
 const seedParam = Number(params.get('seed'));
 const ffParam = Number(params.get('ff') || 0);
+// ?bot=1 交给机器人操作。它不只是调试开关：无头截图要靠它才截得到真实中高分段，
+// 否则空转快进会在十几秒内塞满跑道，永远只截到 C 段。
+const botOn = params.get('bot') === '1';
 
 // ---------- 本地记录 ----------
 const BEST_KEY = 'bcj.best.v2';
@@ -32,7 +36,6 @@ const ui = {
   t: 0,
   sel: modeIndex(params.get('mode') || 'standard'),
   bests: loadBests(),
-  rank: '',
   best: 0,
   newBest: false,
   cb: params.get('cb') === '1',
@@ -142,9 +145,10 @@ function handleEvents() {
 let lastNozzles = 1;
 
 function stepOnce() {
-  game.setInput(paused ? 0 : dir());
+  game.setInput(paused ? 0 : (botOn ? botInput(game) : dir()));
   game.step(DT);
   handleEvents();
+  checkTier();
 
   const n = game.nozzleCount();
   if (n !== lastNozzles) {
@@ -223,13 +227,28 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-function rank(s, mode) {
-  const [b, a, sa, ss] = mode.ranks;
-  if (s >= ss) return 'RANK  SS';
-  if (s >= sa) return 'RANK  S';
-  if (s >= a) return 'RANK  A';
-  if (s >= b) return 'RANK  B';
-  return 'RANK  C';
+// ---------- 段位跨越 ----------
+// 跨档是「事件」，不是「状态」：光把数字染色只改变持续显示，玩家不会记住。
+// 真正记住的是跨过去那一瞬间的爆发 —— 所以这里给浮字 + 冲击波 + 闪光 + 上行音。
+// 分数只增不减，比较可以只升不降；同帧跨两档时只补播最高那档，避免音效叠糊。
+let lastTier = 0;
+
+function tierUp(tier) {
+  if (silent) return;   // ?ff= 快进 / 截图模式不演出
+  const t = TIERS[tier];
+  float(`RANK  ${t.name}`, 300, 68, tier >= 3 ? 30 : 23, t.color);
+  shock(300, 74, 8, 120 + tier * 36, 0.5 + tier * 0.05, `rgba(${t.rgb},ALPHA)`, 2.5 + tier);
+  fx.flash = Math.min(0.34, fx.flash + 0.07 + tier * 0.04);
+  fx.shake = Math.min(18, fx.shake + 1.5 + tier * 1.5);
+  sfx.tierUp(tier);
+}
+
+function checkTier() {
+  const tier = scoreBand(game.score, game.mode);
+  if (tier > lastTier) {
+    lastTier = tier;
+    tierUp(tier);
+  }
 }
 
 function finishRun() {
@@ -238,7 +257,6 @@ function finishRun() {
   ui.bests = saveBest(mode.id, game.score);
   ui.best = Math.max(prev, game.score);
   ui.newBest = game.score > prev;
-  ui.rank = rank(game.score, mode);
   ui.mode = 'result';
   sfx.stopMusic();
 }
@@ -264,8 +282,8 @@ function startRun(idx) {
   paused = false;
   lastNozzles = 1;
   ui.mode = 'play';
-  ui.rank = '';
   ui.newBest = false;
+  lastTier = 0;
   ui.best = ui.bests[mode.id] || 0;
   sfx.init();
   sfx.start();
@@ -355,13 +373,15 @@ if (ffParam > 0) {
   sfx.muted = true;
   const n = Math.min(Math.floor(ffParam / DT), 120 * 130);
   for (let i = 0; i < n; i++) {
-    game.setInput(0);
+    game.setInput(botOn ? botInput(game) : 0);
     game.step(DT);
     handleEvents();
+    checkTier();
     updateFx(DT);   // 快进时一并推进特效寿命，截出来的就是"刚好消除后"的画面
   }
   lastNozzles = game.nozzleCount();
-  if (game.dead) { ui.rank = rank(game.score, game.mode); ui.mode = 'result'; }
+  // 走正常结算：否则快进到死不会写 best，调试截图和真实游玩的战绩会不一致
+  if (game.dead) finishRun();
 }
 
 requestAnimationFrame(frame);

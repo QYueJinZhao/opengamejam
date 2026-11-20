@@ -6,7 +6,7 @@
 
 import { C, R, L, N, D, pointAt, tangentAt, normalAt, mod } from './geom.js';
 import { PALETTE, CFG, comboMult } from './sim.js';
-import { MODES } from './modes.js';
+import { MODES, TIERS, scoreBand, tierProgress } from './modes.js';
 
 const VW = 1200, VH = 800;
 const CX = 600, CY = 400;
@@ -850,37 +850,100 @@ export class Renderer {
     ctx.fillStyle = 'rgba(140,190,255,0.30)';
     ctx.fillText(`${game.mode.en}　·　${game.mode.name}`, CX, 40);
 
-    // 分数
+    // ---- 分数 + 段位 ----
+    // 分数不再用固定白色：颜色本身就是段位信号，玩家余光扫一眼就知道"我在几档"。
+    // 但颜色只是状态，真正驱动「再打一局」的是下面那条"下一档还差多少"。
+    const tp = tierProgress(game.score, game.mode);
+    const tc = tp.tier.color;
+
     ctx.textAlign = 'left';
     ctx.font = `600 11px ${FONT}`;
     ctx.fillStyle = ink(0.34);
-    ctx.fillText('SCORE', 44, 56);
+    ctx.fillText('SCORE', 44, 54);
+
+    // 段位徽标
+    const bw = tp.tier.name.length > 1 ? 27 : 18;
+    ctx.beginPath();
+    ctx.roundRect(99, 42, bw, 15, 3);
+    ctx.fillStyle = tc;
+    ctx.globalAlpha = 0.15;
+    ctx.fill();
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = tc;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.font = `800 10px ${MONO}`;
+    ctx.fillStyle = tc;
+    ctx.textAlign = 'center';
+    ctx.fillText(tp.tier.name, 99 + bw / 2, 53);
+
+    // 分数本体：SS 段加呼吸，让它看起来"在烧"
+    const breathe = tp.i >= 4 ? 0.74 + 0.26 * Math.sin(this.t * 4) : 1;
+    ctx.textAlign = 'left';
     ctx.font = `700 46px ${MONO}`;
-    ctx.fillStyle = ink(0.94);
-    ctx.fillText(String(game.score).padStart(5, '0'), 42, 100);
+    ctx.save();
+    ctx.shadowColor = tc;
+    ctx.shadowBlur = 5 + tp.i * 5;
+    ctx.globalAlpha = breathe;
+    ctx.fillStyle = tc;
+    ctx.fillText(String(game.score).padStart(5, '0'), 42, 98);
+    ctx.restore();
+
+    // 档内进度条：右端刻度 = 下一档的门槛，越接近越亮
+    const sx = 44, sy = 110, sw = 196;
+    ctx.fillStyle = 'rgba(255,255,255,0.09)';
+    ctx.fillRect(sx, sy, sw, 3);
+    ctx.fillStyle = tc;
+    ctx.fillRect(sx, sy, sw * tp.p, 3);
+    if (tp.next) {
+      ctx.fillStyle = tp.next.color;
+      ctx.globalAlpha = 0.45 + 0.55 * tp.p;
+      ctx.fillRect(sx + sw - 1.5, sy - 3, 2, 9);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = 'rgba(255,246,208,0.55)';
+      ctx.fillRect(sx, sy - 1.5, sw, 1.5);
+    }
+
+    // 目标梯度效应：给出确切的"还差多少"
+    ctx.font = `600 10px ${MONO}`;
+    if (tp.next) {
+      ctx.fillStyle = ink(0.26);
+      ctx.fillText('NEXT', sx, 131);
+      ctx.fillStyle = tp.next.color;
+      ctx.globalAlpha = 0.55 + 0.45 * tp.p;
+      ctx.fillText(`${tp.next.name}  −${tp.gap}`, sx + 33, 131);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = tc;
+      ctx.globalAlpha = 0.75;
+      ctx.fillText('MAX TIER', sx, 131);
+      ctx.globalAlpha = 1;
+    }
 
     // 时间
     const leftT = Math.max(0, CFG.levelTime - game.time);
     ctx.font = `600 11px ${FONT}`;
     ctx.fillStyle = ink(0.34);
-    ctx.fillText('TIME', 44, 140);
+    ctx.fillText('TIME', 44, 160);
     ctx.font = `700 26px ${MONO}`;
     ctx.fillStyle = leftT < 15 ? '#FF6B7A' : ink(0.86);
-    ctx.fillText(leftT.toFixed(1) + 's', 42, 170);
+    ctx.fillText(leftT.toFixed(1) + 's', 42, 188);
 
     const barW = 180;
     ctx.fillStyle = 'rgba(255,255,255,0.07)';
-    ctx.fillRect(44, 182, barW, 4);
+    ctx.fillRect(44, 200, barW, 4);
     ctx.fillStyle = leftT < 15 ? '#FF6B7A' : '#5AC8FA';
-    ctx.fillRect(44, 182, barW * (leftT / CFG.levelTime), 4);
+    ctx.fillRect(44, 200, barW * (leftT / CFG.levelTime), 4);
 
     // 节拍
     ctx.font = `600 11px ${FONT}`;
     ctx.fillStyle = ink(0.34);
-    ctx.fillText('BEAT', 44, 218);
+    ctx.fillText('BEAT', 44, 230);
     ctx.font = `700 20px ${MONO}`;
     ctx.fillStyle = ink(0.62);
-    ctx.fillText(game.beat.toFixed(2) + 's', 42, 244);
+    ctx.fillText(game.beat.toFixed(2) + 's', 42, 254);
 
     // 容量
     const occ = game.occupied();
@@ -1056,6 +1119,32 @@ export class Renderer {
       ctx.fillStyle = sel ? ink(0.98) : ink(0.72);
       ctx.fillText(m.name, x + 18, y0 + 40);
 
+      // 历史最高段位徽章：放右上角，和底部那排球色点分开 ——
+      // 放底部会被读成"这关有 6 种球"。
+      // 段位比分数更能留住玩家："我在这关是 S" 是个身份，分数只是一串数字。
+      const best = ui.bests ? ui.bests[m.id] : 0;
+      if (best) {
+        const bt = TIERS[scoreBand(best, m)];
+        const tw = bt.name.length > 1 ? 26 : 17;
+        const bx = x + cw - 18 - tw, by = y0 + 25;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, tw, 15, 3);
+        ctx.fillStyle = bt.color;
+        ctx.globalAlpha = sel ? 0.16 : 0.09;
+        ctx.fill();
+        ctx.globalAlpha = sel ? 0.6 : 0.32;
+        ctx.strokeStyle = bt.color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = sel ? 1 : 0.65;
+        ctx.font = `800 10px ${MONO}`;
+        ctx.fillStyle = bt.color;
+        ctx.textAlign = 'center';
+        ctx.fillText(bt.name, bx + tw / 2, by + 11);
+        ctx.globalAlpha = 1;
+        ctx.textAlign = 'left';
+      }
+
       ctx.font = `600 9px ${MONO}`;
       ctx.fillStyle = sel ? 'rgba(120,200,255,0.65)' : 'rgba(120,200,255,0.32)';
       ctx.fillText(m.en, x + 18, y0 + 58);
@@ -1073,7 +1162,7 @@ export class Renderer {
 
       const stats = [
         `${m.geo.n} 格 · ${m.layout} 射口`,
-        `${m.cfg.levelTime} 秒 · 目标 ${m.target}`,
+        `${m.cfg.levelTime} 秒 · S 线 ${m.tiers[3]}`,
         `节拍 ${m.cfg.beatStart.toFixed(1)}→${m.cfg.beatEnd.toFixed(1)}s`,
       ];
       ctx.font = `600 11px ${MONO}`;
@@ -1092,10 +1181,16 @@ export class Renderer {
         ctx.stroke();
       }
 
-      const best = ui.bests ? ui.bests[m.id] : 0;
+      // 最高分 + 历史最高段位。段位比分数更能留住玩家：
+      // "我在这关是 S"是一个身份，"我打了 8200 分"只是一串数字。
       ctx.font = `600 10px ${MONO}`;
-      ctx.fillStyle = sel ? 'rgba(255,214,90,0.72)' : 'rgba(255,214,90,0.30)';
-      ctx.fillText(best ? `BEST ${best}` : 'BEST —', x + 18, y0 + ch - 14);
+      if (best) {
+        ctx.fillStyle = sel ? ink(0.42) : ink(0.26);
+        ctx.fillText(`BEST ${best}`, x + 18, y0 + ch - 14);
+      } else {
+        ctx.fillStyle = 'rgba(255,214,90,0.30)';
+        ctx.fillText('BEST —', x + 18, y0 + ch - 14);
+      }
       ctx.textAlign = 'center';
     }
 
@@ -1134,12 +1229,21 @@ export class Renderer {
     ctx.fillStyle = ink(0.30);
     ctx.fillText(`${game.mode.en}　·　${game.mode.name}`, CX, 246);
 
+    // 结算页也走同一套段位色：分数越高，整块数字越"烫"。
+    // 下面那句「距 X 还差 N 分」才是复玩驱动的核心 —— 差得越少，重开率越高。
+    const tp = tierProgress(game.score, game.mode);
+    const tc = tp.tier.color;
+
     ctx.font = `600 11px ${FONT}`;
     ctx.fillStyle = ink(0.32);
     ctx.fillText('FINAL SCORE', CX, 282);
+    ctx.save();
     ctx.font = `800 66px ${MONO}`;
-    ctx.fillStyle = ink(0.97);
+    ctx.shadowColor = tc;
+    ctx.shadowBlur = tp.i >= 3 ? 22 : 10;
+    ctx.fillStyle = tc;
     ctx.fillText(String(game.score), CX, 344);
+    ctx.restore();
 
     if (ui.newBest) {
       ctx.font = `700 12px ${MONO}`;
@@ -1158,21 +1262,36 @@ export class Renderer {
       CX, 430
     );
 
-    ctx.font = `700 22px ${MONO}`;
-    ctx.fillStyle = 'rgba(255,214,90,0.9)';
-    ctx.fillText(ui.rank, CX, 480);
+    ctx.save();
+    ctx.font = `800 26px ${MONO}`;
+    ctx.shadowColor = tc;
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = tc;
+    ctx.fillText(`RANK  ${tp.tier.name}`, CX, 478);
+    ctx.restore();
+
+    ctx.font = `600 12px ${MONO}`;
+    if (tp.next) {
+      ctx.fillStyle = ink(0.44);
+      ctx.fillText(`距 ${tp.next.name} 还差 ${tp.gap} 分`, CX, 508);
+    } else {
+      ctx.fillStyle = tc;
+      ctx.globalAlpha = 0.8;
+      ctx.fillText('最高段位达成', CX, 508);
+      ctx.globalAlpha = 1;
+    }
 
     ctx.font = `600 12px ${MONO}`;
     ctx.fillStyle = ink(0.32);
-    ctx.fillText(`BEST ${Math.max(ui.best, game.score)}`, CX, 508);
+    ctx.fillText(`BEST ${Math.max(ui.best, game.score)}`, CX, 536);
 
     const pulse = 0.5 + 0.5 * Math.sin(this.t * 3);
     ctx.font = `600 15px ${FONT}`;
     ctx.fillStyle = `rgba(255,255,255,${0.35 + pulse * 0.4})`;
-    ctx.fillText('空格 再来一局', CX, 556);
+    ctx.fillText('空格 再来一局', CX, 578);
     ctx.font = `500 12px ${FONT}`;
     ctx.fillStyle = ink(0.30);
-    ctx.fillText('ESC 换模式', CX, 584);
+    ctx.fillText('ESC 换模式', CX, 604);
   }
 
   paused() {

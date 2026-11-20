@@ -2,72 +2,21 @@
 // 用法：node test.mjs
 
 import { Game, CFG } from './src/sim.js';
-import { MODES } from './src/modes.js';
+import { MODES, TIERS, scoreBand } from './src/modes.js';
+import { botInput, evalSlot } from './src/bot.js';
 import { N, mod } from './src/geom.js';
 
-const DT = 1 / 60;
+// 必须与 main.js 的 DT 一致。之前这里是 1/60，导致同一个种子在两种步长下
+// 走出完全不同的轨迹（实测标准模式 seed19：1/60 得 6600，1/120 得 14469）——
+// 这类"精确相位对准"的游戏对时序是混沌敏感的，测试步长和运行步长不同，
+// 平衡数据就只是另一个游戏的数据。
+const DT = 1 / 120;
 const CYCLES = 12;
 
 let checks = 0, failed = 0;
 function check(cond, msg) {
   checks++;
   if (!cond) { failed++; console.log('  ✗ ' + msg); }
-}
-
-// 一个槽位对某色的收益：贴边 30、隔一 12、夹心 80、同色叠 15
-function evalSlot(at, k, ci) {
-  const l1 = at(k - 1), r1 = at(k + 1), l2 = at(k - 2), r2 = at(k + 2);
-  let sc = 0;
-  if (l1 && l1.ci === ci) sc += 30;
-  if (r1 && r1.ci === ci) sc += 30;
-  if (l2 && l2.ci === ci) sc += 12;
-  if (r2 && r2.ci === ci) sc += 12;
-  if (l1 && r1 && l1.ci === ci && r1.ci === ci) sc += 80;
-  const c = at(k);
-  if (c === null) sc += 4;
-  else if (c.ci === ci) sc += 15;
-  return sc;
-}
-
-function botInput(game) {
-  const at = (j) => game.slots[mod(j, N)];
-  const idxs = game.nextVolley();
-  const colors = idxs.map((i) => game.queues[i][0]);
-  const offs = idxs.map((i) => game.nozzleOff[i]);
-
-  let bestPhase = 0, bestSc = -1e9;
-  for (let q = 0; q < N; q++) {
-    let sc = 0;
-    for (let k = 0; k < idxs.length; k++) {
-      sc += evalSlot(at, mod(-q + offs[k], N), colors[k]);
-    }
-    if (sc > bestSc) { bestSc = sc; bestPhase = q; }
-  }
-
-  // 截止时刻：有球在飞时，真正的截止是「它落地」，不是「下一拍发射」。
-  // T 设下限 0.30：否则临近落地时增益 1/T 会发散，机器人每帧满速乱撞。
-  const T = Math.max(0.30, game.balls.length
-    ? CFG.flightTime - game.balls[0].t
-    : (game.beat - game.beatClock) + CFG.flightTime);
-
-  // 会预测漂移的控制器（人类玩家的打法）：先算"如果现在松手，落地时相位会在哪"，
-  // 它永远以 drift 前进、不会停住，所以瞄准必须带提前量：
-  //   v(t) = drift + (v-drift)e^{-kt}  →  位移可解析积分，不用逐步模拟
-  const k = CFG.dampK, drift = CFG.drift;
-  const coast = drift * T + (game.v - drift) * (1 - Math.exp(-k * T)) / k;
-  let err = bestPhase - (game.phase + coast);
-  while (err > N / 2) err -= N;
-  while (err < -N / 2) err += N;
-
-  // 发射后收手：飞行期间不再改向。这是球变慢之后新增的必要纪律 ——
-  // 边飞边改会把自己的落点带偏。实测 0.36s 飞行下，这条把存活从 6/16 拉回 14/16。
-  if (game.balls.length) return 0;
-
-  // 在 T 内补上 err 需要的平均速度（漂移是底，追加量叠在上面）
-  const nv = Math.max(-CFG.vMax, Math.min(CFG.vMax, drift + err / T));
-  if (nv > game.v + 0.45) return 1;
-  if (nv < game.v - 0.45) return -1;
-  return 0;
 }
 
 function randomInput(frame, seed) {
@@ -100,9 +49,11 @@ function runOne(modeId, seed, policy) {
 function batch(mode, policy) {
   let score = 0, over = 0, survive = 0, clears = 0, drops = 0;
   let maxCombo = 0, maxChain = 0, endOcc = 0;
+  const bands = [0, 0, 0, 0, 0];
   for (let s = 0; s < CYCLES; s++) {
     const g = runOne(mode.id, 4000 + s * 31, policy);
     score += g.score;
+    bands[scoreBand(g.score, mode)]++;
     if (g.deadReason === 'overflow') over++;
     if (g.deadReason === 'time') survive++;
     clears += g.clears;
@@ -113,7 +64,7 @@ function batch(mode, policy) {
   }
   return {
     score: Math.round(score / CYCLES),
-    over, survive,
+    over, survive, bands,
     clearRatio: clears / Math.max(1, drops),
     combo: (maxCombo / CYCLES).toFixed(1),
     chain: (maxChain / CYCLES).toFixed(1),
@@ -166,10 +117,11 @@ for (const mode of MODES) {
 
   console.log(`【${mode.name} / ${mode.id}】 ${mode.geo.n} 格 · ${mode.layout} 射口 · ${mode.cfg.levelTime}s`);
   console.log(`  瞄准  score=${aim.score}  存活=${aim.survive}/${CYCLES}  爆仓=${aim.over}  清/落=${aim.clearRatio.toFixed(2)}  峰值连消=${aim.combo}  最长连锁=${aim.chain}  末盘=${aim.occ}`);
-  console.log(`  乱按  score=${rand.score}  存活=${rand.survive}/${CYCLES}  爆仓=${rand.over}`);
+  console.log(`  段位  ${TIERS.map((t, i) => `${t.name}:${aim.bands[i]}`).join('  ')}`);
+  console.log(`  乱按  score=${rand.score}  存活=${rand.survive}/${CYCLES}  爆仓=${rand.over}  段位 ${TIERS.map((t, i) => `${t.name}:${rand.bands[i]}`).join(' ')}`);
   console.log(`  挂机  score=${idle.score}  存活=${idle.survive}/${CYCLES}  爆仓=${idle.over}`);
   console.log(`  技巧倍率=${gap.ratio.toFixed(2)}×  双落点同消占比=${(gap.both * 100).toFixed(0)}%`);
-  console.log(`  目标分=${mode.target}  评级线 B/A/S/SS = ${mode.ranks.join(' / ')}`);
+  console.log(`  段位线 C/B/A/S/SS = ${mode.tiers.join(' / ')}`);
   console.log('');
 }
 

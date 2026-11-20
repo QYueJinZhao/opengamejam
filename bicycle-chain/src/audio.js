@@ -229,6 +229,26 @@ export class Sfx {
     this.noise({ dur: 0.3, gain: 0.06, freq: 5200, q: 0.6 });
   }
 
+  /**
+   * 跨段位。上行大三和弦琶音，等级越高音越多、尾巴越长 ——
+   * 玩家不需要看 UI 也能听出"我上了一个台阶"。
+   */
+  tierUp(level = 1) {
+    const seq =
+      level >= 4 ? [523.25, 659.25, 783.99, 1046.5, 1318.51] :
+      level >= 3 ? [523.25, 659.25, 880.0, 1046.5] :
+      level >= 2 ? [523.25, 659.25, 783.99] :
+                   [440.0, 587.33];
+    const g = level >= 4 ? 0.115 : 0.08;
+    seq.forEach((f, i) => {
+      this.tone({ freq: f, dur: 0.24, type: 'sine', gain: g, at: i * 0.055 });
+      this.tone({ freq: f * 2, dur: 0.12, type: 'triangle', gain: g * 0.28, at: i * 0.055 });
+    });
+    if (level >= 4) {
+      this.noise({ dur: 0.45, gain: 0.045, freq: 6400, q: 0.6, at: 0.14 });
+    }
+  }
+
   rushUp(n) {
     const f = PENTA[Math.min(n, 5)] || PENTA[5];
     this.tone({ freq: f * 1.5, dur: 0.09, type: 'sine', gain: 0.05 });
