@@ -210,11 +210,13 @@ export class Sfx {
   clear(chain = 1, rush = 1) {
     const i = Math.min(Math.max(chain, 1) - 1, PENTA.length - 1);
     const f = PENTA[i];
-    this.tone({ freq: f, to: f * 1.5, dur: 0.16, type: 'sine', gain: 0.15 });
-    this.tone({ freq: f * 2, dur: 0.1, type: 'triangle', gain: 0.045, at: 0.008 });
-    this.noise({ dur: 0.11, gain: 0.05, freq: 4200, q: 0.7 });
+    // 尾音跟着视觉一起拉长（0.16→0.24）。三消演出到了 0.7s，
+    // 如果声音还在 0.25s 收干净，看起来就像"画面在回放、声音已经走了"。
+    this.tone({ freq: f, to: f * 1.5, dur: 0.24, type: 'sine', gain: 0.15 });
+    this.tone({ freq: f * 2, dur: 0.14, type: 'triangle', gain: 0.045, at: 0.012 });
+    this.noise({ dur: 0.17, gain: 0.05, freq: 4200, q: 0.7 });
     if (chain >= 2) {
-      this.tone({ freq: f * 2.5, dur: 0.2, type: 'sine', gain: 0.055, at: 0.05 });
+      this.tone({ freq: f * 2.5, dur: 0.28, type: 'sine', gain: 0.055, at: 0.06 });
     }
     if (rush >= 4) {
       const up = PENTA[Math.min(rush % 6, 5)] * 2;

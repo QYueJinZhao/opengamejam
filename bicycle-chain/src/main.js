@@ -49,31 +49,44 @@ const ui = {
   deadAt: 0,
 };
 
-const fx = { parts: [], floats: [], shocks: [], beams: [], flash: 0, shake: 0 };
+const fx = { parts: [], floats: [], shocks: [], beams: [], ghosts: [], flash: 0, shake: 0 };
 
 let game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id);
 let paused = false;
 let silent = false;
 
 // ---------- 特效 ----------
+// 消除的粒子。速度与寿命是一起调的，不能只加寿命：
+// 初速不变而寿命变长，碎片会飘出跑道、飞到 HUD 上，看着像漏液而不是爆炸。
+// 所以"慢"的做法是「初速降下来 + 寿命拉长 + 阻尼减小」，让它慢慢铺开、慢慢落，
+// 而不是原速飞更久。重力同步降低，否则滞空时间一长就变成往下掉。
 function burst(x, y, ci, count = 9, power = 1) {
   const rgb = ['255,77,90', '63,169,255', '255,197,61', '178,107,255', '18,224,184'][ci] || '255,255,255';
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2;
-    const sp = (60 + Math.random() * 260) * power;
+    const sp = (44 + Math.random() * 196) * power;
     fx.parts.push({
       x, y,
-      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60 * power,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 44 * power,
       r: (1.6 + Math.random() * 4.2) * power,
-      life: 0.3 + Math.random() * 0.36,
-      max: 0.66,
+      life: 0.46 + Math.random() * 0.52,
+      max: 0.98,
       color: `rgba(${rgb},ALPHA)`,
     });
   }
 }
 
+// 消失珠子的残影：先胀一下再淡出。
+// 之前珠子是从 slots 里直接删掉的，视觉上"大球瞬间碎成小点"，中间没有过渡——
+// 粒子再漂亮也补不上这一下断裂。残影的作用是把"消失"变成"被吃掉"。
+function ghost(x, y, ci, dur = 0.44) {
+  fx.ghosts.push({ x, y, ci, life: dur, max: dur });
+}
+
 function float(text, x, y, size, color) {
-  fx.floats.push({ text, x, y, size, color, life: 1.05, max: 1.05 });
+  // 1.05 → 1.30：分数浮字是玩家确认"这一下值多少"的唯一凭据，
+  // 三消演出变长后如果数字先消失，会变成"看到爆炸但不知道赚了多少"。
+  fx.floats.push({ text, x, y, size, color, life: 1.30, max: 1.30 });
 }
 
 function shock(x, y, r0, r1, dur, color, w = 3) {
@@ -98,18 +111,21 @@ function handleEvents() {
     } else if (e.type === 'clear') {
       const mid = arcToScreen(e.s0 + e.len * 0.5 * D);
       const gold = e.chain >= 2 || e.combo >= 6;
+      // 三消演出总长从 ~0.4s 拉到 ~0.7s：光带、冲击波、残影、粒子四条线
+      // 同时存在才读得出"消除"这件事，只有一条会变成一闪。
       beam(
-        e.s0, e.len, 0.36,
+        e.s0, e.len, 0.62,
         gold ? 'rgba(255,214,90,ALPHA)' : 'rgba(200,235,255,ALPHA)',
         7 + Math.min(6, e.chain * 2)
       );
       shock(
-        mid.x, mid.y, 10, 60 + e.chain * 26, 0.4,
+        mid.x, mid.y, 10, 60 + e.chain * 26, 0.68,
         gold ? 'rgba(255,214,90,ALPHA)' : 'rgba(180,225,255,ALPHA)', 3
       );
 
       for (let i = 0; i < e.positions.length; i++) {
         const sp = arcToScreen(e.positions[i]);
+        ghost(sp.x, sp.y, e.colors[i], 0.52 + e.chain * 0.05);
         burst(sp.x, sp.y, e.colors[i], e.chain >= 2 ? 12 : 8, e.chain >= 2 ? 1.35 : 1);
       }
 
@@ -178,9 +194,13 @@ function updateFx(dt) {
     p.life -= dt;
     p.x += p.vx * dt;
     p.y += p.vy * dt;
-    p.vx *= Math.exp(-2.6 * dt);
-    p.vy = p.vy * Math.exp(-2.6 * dt) + 420 * dt;
+    p.vx *= Math.exp(-2.0 * dt);
+    p.vy = p.vy * Math.exp(-2.0 * dt) + 320 * dt;
     if (p.life <= 0) fx.parts.splice(i, 1);
+  }
+  for (let i = fx.ghosts.length - 1; i >= 0; i--) {
+    fx.ghosts[i].life -= dt;
+    if (fx.ghosts[i].life <= 0) fx.ghosts.splice(i, 1);
   }
   for (let i = fx.floats.length - 1; i >= 0; i--) {
     fx.floats[i].life -= dt;
@@ -275,6 +295,7 @@ function resetFx() {
   fx.floats.length = 0;
   fx.shocks.length = 0;
   fx.beams.length = 0;
+  fx.ghosts.length = 0;
   fx.flash = 0;
   fx.shake = 0;
 }

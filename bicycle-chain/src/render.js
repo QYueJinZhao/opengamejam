@@ -112,6 +112,8 @@ export class Renderer {
     ctx0.save();
     ctx0.globalAlpha = boardAlpha;
     this.beads(game, ui);
+    // 缩小的旧球压在珠子之上：它是"正在消失的那一颗"，必须在最前面才说得通。
+    this.ghosts(fx);
     this.reticle(game, ui);
     this.projectile(game);
     this.nozzle(game, ui);
@@ -768,6 +770,42 @@ export class Renderer {
   }
 
   // ---------- 特效 ----------
+  // 消失的珠子：原球原地缩小 + 淡出，约 0.5s。
+  //
+  // 这里换过两次做法，都失败：
+  // 第一次画扩散光圈（1.4 倍），但消除后 compact 会把后面的珠子前移占住原位，
+  // 光圈必然和球重叠，读起来是"珠子描了一圈色"；
+  // 第二次把 alpha 压到 0.36 想做成雾，结果几乎看不见，等于没做。
+  //
+  // 根因是想用"新东西"去表示"消失"。最直接的做法是让**那颗球自己**缩掉：
+  // 语义没有歧义，也不会被后来的珠子污染。
+  ghosts(fx) {
+    if (!fx || !fx.ghosts) return;
+    const ctx = this.ctx;
+    for (const g of fx.ghosts) {
+      const a = Math.max(0, g.life / g.max);   // 1 → 0
+      const k = 1 - a;                          // 0 → 1
+      // 前 65% 时间保持实心（球"还在"），后 35% 快速淡出。
+      // 全程线性淡出会让球从第一帧就开始变透明，看着像"本来就画虚了"。
+      const alpha = Math.min(1, a / 0.35);
+      const r = BEAD_R * 0.94 * (1 - 0.68 * k);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      this.ballBody(g.x, g.y, r, g.ci, false);
+      // 全程叠白：白度随缩小同步上升。
+      // 只在尾段白化不够——前半段缩小的球仍是完整的球（有高光和纹样），
+      // 静态看就是"跑道上多出几颗小球"。持续白化才能读成"过载 → 湮灭"。
+      if (k > 0.02) {
+        const w = Math.pow(k, 0.7);
+        ctx.beginPath();
+        ctx.arc(g.x, g.y, r, 0, PI2);
+        ctx.fillStyle = `rgba(255,255,255,${(0.95 * w).toFixed(2)})`;
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
   beams(fx) {
     if (!fx || !fx.beams) return;
     const ctx = this.ctx;
@@ -803,7 +841,10 @@ export class Renderer {
     const ctx = this.ctx;
     for (const s of fx.shocks) {
       const k = 1 - Math.max(0, s.life / s.max);
-      const r = s.r0 + (s.r1 - s.r0) * k;
+      // 半径走缓出而不是线性：线性扩张在整段时间里速度不变，看起来"匀速飘走"；
+      // 缓出是「先铺开、后停住」，同一时长下体感明显更慢、更有分量。
+      const e = 1 - (1 - k) * (1 - k);
+      const r = s.r0 + (s.r1 - s.r0) * e;
       const a = Math.max(0, s.life / s.max);
       ctx.beginPath();
       ctx.arc(s.x, s.y, r, 0, PI2);
