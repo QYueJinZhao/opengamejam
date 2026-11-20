@@ -17,13 +17,11 @@
 //    规则本体在 poker.js；本文件多出来的只有底牌暂存、筹码槽和狂热时间
 //    这三条**属于整台机器**的机制（它们不是某张牌自己的属性）。
 
-import {
-  C, N, D, L, mod, configure, RULE as TRACK_RULE, NOZZLE_SLOTS,
-} from './geom.js';
+import { C, N, D, L, mod, configure } from './geom.js';
 import { getMode } from './modes.js';
 import {
   PIPS, DICE_SPECIAL, isPip, pipOf, pipIndex, isFlipDie, findPattern,
-  patternValue, patternLabel, evalPlacement, bestPipAt, bestSharedPip,
+  patternValue, patternLabel, evalPlacement, bestPipAt,
 } from './dice.js';
 import {
   CARD_BASE, SHIFT_BASE, SUITS, cardSkin, isFaceCard, isShiftCard,
@@ -219,8 +217,6 @@ export const BASE_CFG = {
   chainTime: null,     // 连消续时表：下标 = chain（2 → +1.5s … 5 → +6s）
   timeBonusCap: 0,     // 一局最多续多少秒
   blankAt: 0,          // 连续 N 发落空 → 往蛇尾塞一颗铅骰（0 = 关闭）
-  syncEvery: 0,        // 每 N 秒一次「双响同点」福利（0 = 关闭）
-  syncStart: 1e9,
   pads: null,          // [{ rel, kind, at, name }] —— rel 相对 0 号射口的槽位偏移
   rollDur: 0.26,       // 骰子翻滚动画时长（落地 / 被翻面时播一次）
 
@@ -290,6 +286,48 @@ export const TEMPO_MARKS = [
   { at: 0.999, name: '红线', color: '#FF5C8A' },
 ];
 
+// ---- 音乐出球模式的 BPM 曲线 ----
+//
+// 两段慢、两段快，之间用 8~10% 的进度做斜坡，避免 BPM 瞬间跳变。
+// 88→148 的半小节是 1.36s→0.81s：慢段能看清盘面，快段明显"赶"。
+const MUSIC_BPM_KEYS = [
+  [0.00, 88], [0.20, 88],
+  [0.30, 104], [0.50, 104],
+  [0.60, 124], [0.78, 124],
+  [0.88, 148], [1.00, 148],
+];
+
+// ---- 音画映射：角度 → 五声音阶 ----
+//
+// 7 个固定角度档位，中心 0° 是 G4，八度关系保证怎么随机都不跑调：
+//   -24° C4 / -16° D4 / -8° E4 / 0° G4 / +8° A4 / +16° C5 / +24° E5
+// 连续角度只用于炮身视觉；音高必须吸附到档位，否则会像警报器。
+export const AIM_ANGLES = [-24, -16, -8, 0, 8, 16, 24];
+export const AIM_FREQS = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 659.25];
+
+export function aimFreqStep(step) {
+  return AIM_FREQS[Math.max(0, Math.min(AIM_FREQS.length - 1, step | 0))];
+}
+
+/** 角度档位 → 左右声像：-0.65（左）… +0.65（右）。 */
+export function aimPanStep(step) {
+  return ((Math.max(0, Math.min(6, step | 0)) / 6) * 2 - 1) * 0.65;
+}
+
+/** 进度 0..1 → 当前音乐 BPM（线性插值）。 */
+export function musicBpmAt(prog) {
+  const p = Math.max(0, Math.min(1, prog));
+  for (let i = 1; i < MUSIC_BPM_KEYS.length; i++) {
+    const [p1, b1] = MUSIC_BPM_KEYS[i];
+    if (p <= p1) {
+      const [p0, b0] = MUSIC_BPM_KEYS[i - 1];
+      const u = p1 === p0 ? 0 : (p - p0) / (p1 - p0);
+      return b0 + (b1 - b0) * u;
+    }
+  }
+  return MUSIC_BPM_KEYS[MUSIC_BPM_KEYS.length - 1][1];
+}
+
 /** tempo(0..1) → 每消倍率。渲染层与逻辑层共用，避免 HUD 与实际结算不一致。 */
 export function tempoMultOf(tempo, gain = 0.45) {
   return 1 + gain * Math.max(0, Math.min(1, tempo));
@@ -320,39 +358,22 @@ export function mulberry32(seed) {
 let beadSeq = 1;
 
 /**
- * 炮口槽位。
- *
- * 双炮刻意摆在**同一条直道**上，而不是上一版的 [0, N/2]（顶部 + 底部）。
- * 上一版两座炮口对射：玩家既要理解"上面那个朝下打"，又要理解"下面那个朝上打"，
- * 视线被劈成上下两半。同向后两座炮并排朝一个方向，这是直线射击游戏的默认直觉，
- * 也让"转轮盘把目标送到炮口下"这一个动作就够了，不用在两个半场之间切换。
- *
- * k = floor(C/D) 是"这条直道最多能放几格"。取足它有两个作用：
- * 一是两座炮都还在直道上（直道的法向是垂直的，炮身才是正着的）；
- * 二是落点尽量拉开，缓解同向带来的"两个口打得太近"。
- *
- * 代价是真实的：落点间距从 N/2 格缩到 2k 格，段位线必须重测。
+ * 炮口槽位：单喷头固定在 0 号槽（椭圆顶部正中）。
+ * 保留这个函数，是为了让"炮口在哪"仍然只有一处定义。
  */
-function buildNozzleOff(layout) {
-  // 非椭圆拓扑自带射口槽位：8 字的交叉口、大小轮的上/下切线中点、
-  // 三角链的三条边中点。几何层已经把它们算成槽位，这里只取前 layout 个。
-  if (TRACK_RULE !== 'oval' && NOZZLE_SLOTS) {
-    return NOZZLE_SLOTS.slice(0, layout);
-  }
-  if (layout === 2) {
-    const k = Math.max(2, Math.floor(C / D));
-    return [N - k, k];
-  }
-  return Array.from({ length: layout }, (_, i) => Math.round((i * N) / layout));
+function buildNozzleOff() {
+  return [0];
 }
 
 export class Game {
-  constructor(seed = 20261120, modeId = 'standard') {
+  constructor(seed = 20261120, modeId = 'standard', fireMode = 'timer') {
     this.mode = getMode(modeId);
     this.modeId = this.mode.id;
+    // 出球模式：'timer' 走原来的时间/分数曲线；'music' 走音乐半小节。
+    this.fireMode = fireMode === 'music' ? 'music' : 'timer';
     // 先改几何，再建盘面：N / D 是 live binding，后面所有代码读到的都是新值
     configure(this.mode.geo);
-    this.nozzleOff = buildNozzleOff(this.mode.layout);
+    this.nozzleOff = buildNozzleOff();
     Object.assign(CFG, BASE_CFG, this.mode.cfg);
     // 规则族必须在 reset 之前定：placeOpening 里的"不许预先成型"用的就是它。
     this.rules = this.mode.rules || 'color';
@@ -384,16 +405,27 @@ export class Game {
     this.maxTempo = 0;
     this.fastT = 0;          // 满速累计时长：结算页用它回答"这局机器跑起来了吗"
 
+    // ---- 喷头演出状态（纯表现，不参与判定）----
+    // firePulse 在出膛瞬间置 1，随后 0.30s 内线性衰减到 0；
+    // 渲染层拿它做炮口闪光、后坐和烟雾，音效层拿它对齐开火音。
+    this.firePulse = 0;
+    this.fireSeq = 0;        // 第几发：让每次闪光的星芒角度略有不同
+    this.musicBpm = 0;       // 音乐出球模式的当前 BPM（timer 模式为 0）
+    this.musicTempo = 0;     // BPM 归一化后的 0..1，供 HUD / 音效使用
+    this.musicBeatPhase = 0; // 当前四分音符内的相位，渲染层做拍点脉冲
+    this.aimAngle = 0;       // 炮身视觉角度（度，连续平滑）
+    this.aimStep = 3;        // 音高档位 0..6（0=-24°，3=0°，6=+24°）
+    this.lastShotAngle = 0;  // 上一发锁定的角度
+    this.lastShotStep = 3;   // 上一发的音高档位
+
     // ---- 骰子模式状态（基础模式恒为 0 / 空，不影响任何既有逻辑）----
-    // 加时、漏发、双响、镀金全部记在这里，结算页与 HUD 直接读。
+    // 加时、漏发、镀金全部记在这里，结算页与 HUD 直接读。
     this.timeBonus = 0;      // 连消续来的秒数（受 CFG.timeBonusCap 封顶）
     this.missStreak = 0;     // 连续落空发数（铅骰规则）
     this.blanks = 0;         // 本局塞进去的铅骰数
     this.padHits = 0;        // 踩中 +1 / ×2 槽的次数
     this.jackpots = 0;       // 6-6-6 次数
     this.longestRun = 0;     // 本局最长的顺子（结算页用）
-    this.syncClock = 0;
-    this.syncs = 0;
 
     // ---- 扑克模式状态（其余模式恒为 0 / null）----
     this.hold = null;          // 底牌暂存槽里那张牌（ci）
@@ -879,31 +911,42 @@ export class Game {
 
     this.time += dt;
 
-    // ---- 节奏：时间地板 vs 分数曲线，取更快的那条 ----
+    // ---- 出球节奏：两种模式共用同一条"拍间隔 → 倍率"管线 ----
     //
-    // 为什么是 min 而不是加权平均：两条曲线各自守着一种玩家。
-    // 打得差的玩家，分数曲线永远抬不动，只剩时间地板能把他推到 beatEnd，
-    // 所以他也能体验到"机器在加速"，只是上限低；打得好的玩家早就把
-    // 时间地板甩在后面，被自己的分数一路推到 beatRush。
-    // 用平均的话，两种玩家都会被拖到中间，谁都不满意。
-    const tRamp = Math.min(1, this.time / CFG.rampSec);
-    const beatTime = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * tRamp;
+    // timer：时间地板 vs 分数曲线取更快的那条（原来的曲线）。
+    // music：半小节一颗，BPM 按 MUSIC_BPM_KEYS 在两慢两快之间走。
+    //        88→148 BPM 对应 1.36s→0.81s 的颗间隔，玩家听到的鼓点
+    //        和炮口蓄力是同一个拍子。
+    if (this.fireMode === 'music') {
+      const prog = Math.min(1, this.time / Math.max(1, CFG.levelTime));
+      this.musicBpm = musicBpmAt(prog);
+      this.beat = 2 * 60 / this.musicBpm;          // 半小节 = 2 拍
+      this.musicTempo = Math.max(0, Math.min(1, (this.musicBpm - 88) / 60));
+      this.tempo = this.musicTempo;
+      // 相位用累加而不是 time / 拍长：BPM 变化时不会突然跳一下。
+      this.musicBeatPhase = (this.musicBeatPhase + dt / (60 / this.musicBpm)) % 1;
+    } else {
+      const tRamp = Math.min(1, this.time / CFG.rampSec);
+      const beatTime = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * tRamp;
+      const prog = Math.min(1, this.score / Math.max(1, CFG.tempoRef));
+      // 0.85 次幂：前段抬得快一点。线性的话，前 20% 的分数只换来 20% 的加速，
+      // 而玩家在开局那一段最需要"我做的每件事都有反应"的即时回馈。
+      const beatScore = CFG.beatStart + (CFG.beatRush - CFG.beatStart) * Math.pow(prog, 0.85);
+      this.beat = Math.max(CFG.beatRush, Math.min(beatTime, beatScore));
 
-    const prog = Math.min(1, this.score / Math.max(1, CFG.tempoRef));
-    // 0.85 次幂：前段抬得快一点。线性的话，前 20% 的分数只换来 20% 的加速，
-    // 而玩家在开局那一段最需要"我做的每件事都有反应"的即时回馈。
-    const beatScore = CFG.beatStart + (CFG.beatRush - CFG.beatStart) * Math.pow(prog, 0.85);
-
-    this.beat = Math.max(CFG.beatRush, Math.min(beatTime, beatScore));
-
-    // tempo 是"当前速度"的归一化，不是分数进度。分开的理由：
-    // 时间地板也在加速，如果 tempo 只看分数，一个从不消球的玩家
-    // 会看到机器越转越快、倍率却一直是 1.00——那是在骗他。
-    const span = Math.max(1e-6, CFG.beatStart - CFG.beatRush);
-    this.tempo = Math.max(0, Math.min(1, (CFG.beatStart - this.beat) / span));
+      // tempo 是"当前速度"的归一化，不是分数进度。分开的理由：
+      // 时间地板也在加速，如果 tempo 只看分数，一个从不消球的玩家
+      // 会看到机器越转越快、倍率却一直是 1.00——那是在骗他。
+      const span = Math.max(1e-6, CFG.beatStart - CFG.beatRush);
+      this.tempo = Math.max(0, Math.min(1, (CFG.beatStart - this.beat) / span));
+      this.musicBpm = 0;
+      this.musicTempo = 0;
+      this.musicBeatPhase = 0;
+    }
     this.tempoMult = tempoMultOf(this.tempo, CFG.tempoGain);
     if (this.tempo > this.maxTempo) this.maxTempo = this.tempo;
     if (this.tempo >= 0.995) this.fastT += dt;
+    if (this.firePulse > 0) this.firePulse = Math.max(0, this.firePulse - dt / 0.30);
 
     // 飞行时长跟着颗间隔收紧。地板在这里是"拍内空档"（1 - ratio），
     // 所以 beat 再也不需要 max(beat, flight + fireGap) 这种事后夹逼：
@@ -931,6 +974,15 @@ export class Game {
     }
     this.v = Math.max(-CFG.vMax, Math.min(CFG.vMax, this.v));
     this.phase = mod(this.phase + this.v * dt, N);
+
+    // 炮身瞄准角：把"转盘速度"映射到 -24°~+24° 的 7 个固定档位。
+    // 中心是静止漂移，所以松手时会回到 0°；音频只认 aimStep，
+    // aimAngle 只负责炮身平滑倾斜——两者共用同一套档位。
+    const aimRel = (this.v - CFG.drift) / Math.max(0.1, CFG.vMax - CFG.drift);
+    const aimRaw = Math.max(-24, Math.min(24, aimRel * 24));
+    this.aimStep = Math.max(0, Math.min(6, Math.round((aimRaw + 24) / 8)));
+    const aimTarget = AIM_ANGLES[this.aimStep];
+    this.aimAngle += (aimTarget - this.aimAngle) * Math.min(1, dt * 14);
 
     // 补位：恒速收拢，不是指数衰减。速度值记在珠子自己身上（dv），
     // 因为两种动作的速度差一个量级：
@@ -981,16 +1033,6 @@ export class Game {
       }
     }
 
-    // 双响同点：每 syncEvery 秒，两台炮同时换上"现在最该打的那一点"。
-    // 它不是难度，是**福利**——所以放在 step 里按时间发放，不占任何结算路径。
-    if (CFG.syncEvery > 0 && this.time >= CFG.syncStart) {
-      this.syncClock += dt;
-      if (this.syncClock >= CFG.syncEvery) {
-        this.syncClock -= CFG.syncEvery;
-        this.loadSync();
-      }
-    }
-
     if (this.time >= this.timeLimit()) this.kill('time');
   }
 
@@ -1001,29 +1043,6 @@ export class Game {
 
   timeLeft() {
     return Math.max(0, this.timeLimit() - this.time);
-  }
-
-  /**
-   * 双响同点：把当前开放的射口全部装填同一个点数。
-   *
-   * 选点用 bestSharedPip（两个落点收益之和最大），而不是简单复制待发球。
-   * 复制的话，如果待发球恰好是个爆破骰，另一门炮也会变成爆破骰——
-   * 一次给两颗炸弹会直接抹掉两拍的盘面压力，那是奖励失控，不是福利。
-   */
-  loadSync() {
-    const n = this.nozzleCount();
-    if (n < 2) return;
-    const offs = [];
-    for (let i = 0; i < n; i++) offs.push(this.nozzleOff[i]);
-    const at = (j) => this.slots[mod(j, N)];
-    const pip = bestSharedPip(at, N, offs, (k) => this.slots[k] !== null);
-    const ci = pip - 1;
-    for (let i = 0; i < n; i++) {
-      // 只换待发位，预览位保持原样：玩家的下一步规划不该被一次福利整体改写。
-      this.queues[i][0] = ci;
-    }
-    this.syncs++;
-    this.events.push({ type: 'sync', pip, offs, n });
   }
 
   /**
@@ -1085,6 +1104,10 @@ export class Game {
 
     this.balls = [{ ci, off: this.nozzleOff[idx], idx, t: 0, dur }];
 
+    this.firePulse = 1;
+    this.fireSeq++;
+    this.lastShotAngle = this.aimAngle;
+    this.lastShotStep = this.aimStep;
     this.shots++;
     this.drops++;
     this.events.push({
@@ -1093,6 +1116,10 @@ export class Game {
       offs: [this.nozzleOff[idx]],
       idx,
       n: 1,
+      angle: this.aimAngle,
+      aimStep: this.aimStep,
+      root: aimFreqStep(this.aimStep),
+      pan: aimPanStep(this.aimStep),
     });
   }
 
@@ -1555,6 +1582,10 @@ export class Game {
         dbl, golds, jackpot: !!run.jackpot,
         label: info.name,
         color: info.color,
+        // 音画映射：这一段连锁以"上一发锁定角度"的音高为根音。
+        angle: this.lastShotAngle,
+        root: aimFreqStep(this.lastShotStep),
+        pan: aimPanStep(this.lastShotStep),
       });
 
       // 同花顺点火：7 秒狂热 + 续时。放在 clear 事件之后，
@@ -1569,6 +1600,8 @@ export class Game {
         this.events.push({
           type: 'frenzy', dur: this.frenzyT, mult: CFG.frenzyMult || 1,
           add: this.timeBonus - before, total: this.timeBonus,
+          root: aimFreqStep(this.lastShotStep),
+          pan: aimPanStep(this.lastShotStep),
         });
       }
 

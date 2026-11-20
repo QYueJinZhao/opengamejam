@@ -239,24 +239,4 @@ export function bestPipAt(at, N, k, occupied) {
   return bestPip;
 }
 
-/**
- * 双喷头"双响同点"选点：给两个落点同时选一个点数，使两边收益之和最大。
- * 用 ±2 格的窗口近似"这一拍可能落在哪儿"——精确解要对 30 个相位各算一次，
- * 而这个奖励是每 14 秒一次的福利，不需要精确到格。
- */
-export function bestSharedPip(at, N, offs, occupiedOf) {
-  let bestPip = 1, bestSc = -1;
-  for (let pip = 1; pip <= 6; pip++) {
-    let sum = 0;
-    for (const off of offs) {
-      let m = 0;
-      for (let d = -2; d <= 2; d++) {
-        const k = ((off + d) % N + N) % N;
-        m = Math.max(m, evalPlacement(at, N, k, pip - 1, occupiedOf(k)));
-      }
-      sum += m;
-    }
-    if (sum > bestSc) { bestSc = sum; bestPip = pip; }
-  }
-  return bestPip;
-}
+

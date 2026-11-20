@@ -95,7 +95,12 @@ export class Sfx {
    */
   setTempo(x) {
     const t = Math.max(0, Math.min(1, x || 0));
-    this.bpm = 96 + 46 * t;
+    this.setBpm(96 + 46 * t);
+  }
+
+  /** 直接指定 BPM：音乐出球模式用 88~148，不走 96~142 的归一化映射。 */
+  setBpm(bpm) {
+    this.bpm = Math.max(72, Math.min(168, bpm || 96));
     this.stepDur = 60 / this.bpm / 2;
   }
 
@@ -106,7 +111,23 @@ export class Sfx {
     this.tone({ freq: f * 1.5, dur: 0.13, type: 'sine', gain: 0.045, at: 0.06 });
   }
 
-  tone({ freq = 440, to = null, dur = 0.12, type = 'sine', gain = 0.3, at = 0, bus = 'sfx' }) {
+  /** 把节点接到总线；pan 非 0 时串一个 StereoPannerNode。 */
+  _out(node, bus = 'sfx', pan = 0) {
+    const dest = bus === 'music' ? this.musicBus : this.sfxBus;
+    if (pan && this.ctx.createStereoPanner) {
+      const p = this.ctx.createStereoPanner();
+      p.pan.value = Math.max(-1, Math.min(1, pan));
+      node.connect(p);
+      p.connect(dest);
+    } else {
+      node.connect(dest);
+    }
+  }
+
+  tone({
+    freq = 440, to = null, dur = 0.12, type = 'sine', gain = 0.3,
+    at = 0, bus = 'sfx', pan = 0, cutoff = 0,
+  }) {
     if (!this.on) return;
     const t0 = this.ctx.currentTime + at;
     const osc = this.ctx.createOscillator();
@@ -118,12 +139,24 @@ export class Sfx {
     g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t0 + 0.008);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     osc.connect(g);
-    g.connect(bus === 'music' ? this.musicBus : this.sfxBus);
+    let out = g;
+    if (cutoff) {
+      const f = this.ctx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = cutoff;
+      f.Q.value = 0.7;
+      g.connect(f);
+      out = f;
+    }
+    this._out(out, bus, pan);
     osc.start(t0);
     osc.stop(t0 + dur + 0.03);
   }
 
-  noise({ dur = 0.1, gain = 0.15, freq = 1800, q = 0.9, type = 'bandpass', at = 0, bus = 'sfx' }) {
+  noise({
+    dur = 0.1, gain = 0.15, freq = 1800, q = 0.9, type = 'bandpass',
+    at = 0, bus = 'sfx', pan = 0,
+  }) {
     if (!this.on) return;
     const t0 = this.ctx.currentTime + at;
     const src = this.ctx.createBufferSource();
@@ -136,7 +169,7 @@ export class Sfx {
     g.gain.setValueAtTime(Math.max(0.0002, gain), t0);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     src.connect(f); f.connect(g);
-    g.connect(bus === 'music' ? this.musicBus : this.sfxBus);
+    this._out(g, bus, pan);
     src.start(t0);
     src.stop(t0 + dur + 0.03);
   }
@@ -214,9 +247,85 @@ export class Sfx {
     this.tone({ freq: 1600 + speed * 26, dur: 0.013, type: 'square', gain: 0.018 });
   }
 
-  fire(idx = 0) {
-    this.tone({ freq: 560 + idx * 70, to: 900 + idx * 80, dur: 0.07, type: 'triangle', gain: 0.055 });
-    this.noise({ dur: 0.04, gain: 0.02, freq: 3200, q: 0.8 });
+  /**
+   * 出膛：机械层 + 颜色音色层。
+   *
+   *   机械层（居中）—— 低频炮膛 / 金属撞击 / 回弹弹簧，负责"这是一台机器"。
+   *   音色层（按 ci）—— 紫=钟、金=铜管、红=低通贝斯、青=拨弦。
+   *   音高层（root）—— 由炮身角度档位给出，五声音阶吸附，不连续变频。
+   *   声像层（pan）—— 角度 -24°~+24° → pan -0.65~+0.65。
+   *
+   * 高音区（≥C5）统一乘 0.708（约 -3 dB），连玩十几分钟不刺耳。
+   */
+  fire(idx = 0, ci = 0, root = 392.0, pan = 0) {
+    this.tone({ freq: 150, to: 46, dur: 0.18, type: 'sine', gain: 0.16 });
+    this.tone({ freq: 1500, to: 460, dur: 0.035, type: 'square', gain: 0.045, pan: pan * 0.35 });
+    this.noise({ dur: 0.055, gain: 0.07, freq: 2500, q: 0.75, pan: pan * 0.25 });
+    this.tone({ freq: 250, to: 165, dur: 0.10, type: 'triangle', gain: 0.035, at: 0.075 });
+
+    const gs = root >= 520 ? 0.708 : 1;
+    if (ci === 0) {
+      // 紫：清透钟音
+      this.tone({ freq: root, dur: 0.22, type: 'sine', gain: 0.085 * gs, pan });
+      this.tone({ freq: root * 2, dur: 0.16, type: 'sine', gain: 0.030 * gs, pan, at: 0.012 });
+      this.tone({ freq: root * 3, dur: 0.10, type: 'sine', gain: 0.015 * gs, pan, at: 0.020 });
+    } else if (ci === 1) {
+      // 金：温润方波铜管
+      this.tone({ freq: root, dur: 0.16, type: 'square', gain: 0.040 * gs, pan });
+      this.tone({ freq: root * 1.004, dur: 0.16, type: 'triangle', gain: 0.035 * gs, pan });
+      this.tone({ freq: root * 2, dur: 0.10, type: 'triangle', gain: 0.018 * gs, pan, at: 0.01 });
+    } else if (ci === 2) {
+      // 红：厚重低通合成贝斯（降八度，低通去掉刺耳泛音）
+      this.tone({ freq: root * 0.5, dur: 0.26, type: 'sawtooth', gain: 0.055 * gs, pan, cutoff: 520 });
+      this.tone({ freq: root * 0.5025, dur: 0.24, type: 'sawtooth', gain: 0.035 * gs, pan, cutoff: 420 });
+      this.tone({ freq: root * 0.5, dur: 0.22, type: 'sine', gain: 0.030 * gs, pan });
+    } else if (ci === 3) {
+      // 青：清脆高频拨弦
+      this.tone({ freq: root * 2, dur: 0.07, type: 'triangle', gain: 0.060 * gs, pan });
+      this.tone({ freq: root * 4, dur: 0.05, type: 'sine', gain: 0.022 * gs, pan, at: 0.004 });
+      this.noise({ dur: 0.03, gain: 0.028, freq: 5200, q: 1.2, pan });
+    } else {
+      // 骰子 / 扑克 / 特殊球：中性亮拨弦
+      this.tone({ freq: root, dur: 0.14, type: 'triangle', gain: 0.050 * gs, pan });
+      this.tone({ freq: root * 1.5, dur: 0.09, type: 'sine', gain: 0.020 * gs, pan, at: 0.01 });
+    }
+  }
+
+  /**
+   * 连消琶音：以落点角度的音高为根音，沿大调五声音阶向上。
+   * spacing 跟 BGM 的八分音符成比例，所以琶音天然落在音乐网格上。
+   */
+  arpeggio(root = 440, pan = 0, steps = 3) {
+    const scale = [0, 2, 4, 7, 9, 12, 14, 16];
+    const spacing = Math.max(0.03, Math.min(0.085, this.stepDur * 0.28));
+    const n = Math.max(1, Math.min(5, steps | 0));
+    for (let i = 0; i < n; i++) {
+      const f = root * Math.pow(2, scale[i] / 12);
+      const gs = f >= 520 ? 0.708 : 1;
+      this.tone({ freq: f, dur: 0.10, type: 'triangle', gain: 0.045 * gs, pan, at: i * spacing });
+      this.tone({ freq: f * 2, dur: 0.055, type: 'sine', gain: 0.016 * gs, pan, at: i * spacing + 0.006 });
+    }
+    if (n >= 4) {
+      this.tone({ freq: root * 4, dur: 0.18, type: 'sine', gain: 0.020, pan, at: n * spacing });
+    }
+  }
+
+  /** 狂热：以当前角度为根音的大三和弦琶音 + 高频闪光。 */
+  frenzy(root = 440, pan = 0) {
+    const chord = [0, 4, 7, 12, 16];
+    chord.forEach((semi, i) => {
+      const f = root * Math.pow(2, semi / 12);
+      const gs = f >= 520 ? 0.708 : 1;
+      this.tone({ freq: f, dur: 0.42, type: 'sine', gain: 0.050 * gs, pan, at: i * 0.045 });
+      this.tone({ freq: f * 2, dur: 0.22, type: 'triangle', gain: 0.020 * gs, pan, at: i * 0.045 + 0.01 });
+    });
+    this.noise({ dur: 0.42, gain: 0.035, freq: 7200, q: 0.6, at: 0.05, pan: pan * 0.5 });
+  }
+
+  /** 充能近满：一声很轻的"上弦"，提示再过半拍就要出膛。 */
+  chargeReady() {
+    this.tone({ freq: 880, to: 1320, dur: 0.10, type: 'sine', gain: 0.022 });
+    this.noise({ dur: 0.045, gain: 0.016, freq: 5200, q: 1.2 });
   }
 
   click() { this.tone({ freq: 470, to: 300, dur: 0.05, type: 'triangle', gain: 0.08 }); }
@@ -258,7 +367,10 @@ export class Sfx {
    *   顺子（run） —— 按点数逐个上行，几点就几个音。玩家闭着眼也能听出自己消了几连顺。
    * 这是整个项目里唯一一处"用音高直接映射游戏量"的地方，值得为它单开分支。
    */
-  clear(chain = 1, rush = 1, rank = 0, kind = null, len = 3) {
+  clear(chain = 1, rush = 1, rank = 0, kind = null, len = 3, root = 440, pan = 0) {
+    // 连消琶音：先铺在下面，再叠各规则族自己的消除音。
+    // 根音来自上一发的角度档位，所以"左边打出的连锁"会从低音区起。
+    if (chain >= 2) this.arpeggio(root, pan, Math.min(5, chain));
     // ---- 扑克：四种牌型四条音型 ----
     // 同花顺是一串上行 + 长尾；同花是三音和弦；三条是"三下同音"；
     // 顺子是逐级上行。玩家闭着眼也能听出这一下是哪种牌型。

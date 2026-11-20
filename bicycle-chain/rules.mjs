@@ -1,9 +1,8 @@
-import { Game, CFG, WILD, BOMB, RUST, isColor, comboTierIndex } from './src/sim.js';
 import {
-  N, D, mod, configure, geometry, pointAt, tangentAt, normalAt,
-  BOUND, PULLEYS, NOZZLE_SLOTS, NOZZLE_ANCHOR, CROSS_SLOTS,
-} from './src/geom.js';
-import { MODES, getMode } from './src/modes.js';
+  Game, CFG, WILD, BOMB, RUST, isColor, comboTierIndex, musicBpmAt,
+  aimFreqStep, aimPanStep, AIM_FREQS,
+} from './src/sim.js';
+import { N, D, mod } from './src/geom.js';
 import { botInput } from './src/bot.js';
 import { patternValue, pipOf, isFlipDie } from './src/dice.js';
 import {
@@ -245,24 +244,27 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   console.log(`  · 挂机一局：注入锈球 ${rust} 颗，爆破 ${bomb} 次，得分 ${g.score}`);
 }
 
-// 10) 轮流发射：一次只出一颗，口按顺序轮转
-//
-// 这一条守的是本轮最核心的机制改动。上一版每拍齐射：两个口同帧出球、
-// 同帧落地，玩家只有一个相位可调，屏幕上却有两颗球要读。改成轮流之后，
-// 每一发都是独立事件——但必须真的"轮"，否则双炮会有一门永远闲置。
+// 10) 单喷头：所有模式只有一个 0 号口，一次只出一颗
 {
   const g = new Game(31, 'standard');
-  g.time = 30;                      // 标准模式 20s 后第二个口才上线，之前只有一个口
+  g.time = 60;
   const idxs = [];
   for (let i = 0; i < 6; i++) { g.fire(); idxs.push(g.balls[0].idx); }
-  ok(idxs.join('') === '010101', `双口交替开火（得到 ${idxs.join('')}）`);
+  ok(idxs.every((i) => i === 0), `始终从 0 号口出球（得到 ${idxs.join('')}）`);
   ok(g.balls.length === 1, `一次只出一颗球（${g.balls.length}）`);
+  ok(g.queues.length === 1, `只有一个待发队列（${g.queues.length}）`);
 
-  const h = new Game(33, 'triple');
-  h.time = 40;                      // 三射口模式 30s 后第三个口才上线
-  const t = [];
-  for (let i = 0; i < 6; i++) { h.fire(); t.push(h.balls[0].idx); }
-  ok(t.join('') === '012012', `三口按 0→1→2 轮转（得到 ${t.join('')}）`);
+  const h = new Game(33, 'grand');
+  h.time = 80;
+  ok(h.queues.length === 1 && h.nozzleCount() === 1,
+    '大轮长跑同样只有一个队列、一个口');
+
+  // 喷头演出状态：出膛置 1，0.30 秒内衰减到 0。
+  const p = new Game(34, 'standard');
+  p.fire();
+  ok(p.firePulse === 1, `出膛瞬间 firePulse = 1（${p.firePulse}）`);
+  for (let i = 0; i < 40; i++) p.step(1 / 120);
+  ok(p.firePulse === 0, `0.33 秒后 firePulse 归零（${p.firePulse}）`);
 }
 
 // 11) 飞行期间不发射下一颗：空中最多一颗球
@@ -552,23 +554,12 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
     ok(h.blanks === 0 && h.missStreak === 0, '旋转 / 拨片引起的空结算不计漏发');
   }
 
-  // 23) 双响同点：只换待发位，预览位保持原样
-  //
-  // 预览位是玩家"下一步规划"的全部信息，一次福利把它整体改写，
-  // 等于替他重新做了一遍计划——那是干扰，不是奖励。
+  // 23) 单喷头：骰子模式也只有一个待发队列
   {
     const g = new Game(104, 'dice');
-    g.slots.fill(null);
-    g.time = 50;                                     // 第二射口 44s 上线
-    [2, 4, 6, 1, 3, 5].forEach((p, i) => { g.slots[mod(4 + i, N)] = g.makeBead(p - 1); });
-    g.queues[0] = [0, 3, 5];
-    g.queues[1] = [2, 4, 1];
-    g.drainEvents();
-    g.loadSync();
-    const ev = g.drainEvents().find((e) => e.type === 'sync');
-    ok(g.queues[0][0] === g.queues[1][0], `两台炮的待发位同点（${g.queues[0][0]} / ${g.queues[1][0]}）`);
-    ok(g.queues[0][1] === 3 && g.queues[0][2] === 5, '只换待发位，两个预览位保持原样');
-    ok(ev && g.syncs === 1, '双响同点发了事件并计数');
+    ok(g.queues.length === 1, `只有一个待发队列（${g.queues.length}）`);
+    ok(g.queues[0].length === 3, `队列仍是三颗预览（${g.queues[0].length}）`);
+    ok(g.nozzleCount() === 1, '骰子模式只有一个顶部喷头');
   }
 
   // 24) 连消续时：chain 2 才给，且有封顶
@@ -768,192 +759,76 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   }
 }
 
-// ===============================================================
-// 跑道拓扑（第九轮）
-//
-// 守的是"换拓扑不换规则"：弧长参数化必须闭合、每个槽位的点/切向/法向
-// 都要有效、炮口槽必须落在几何层指定的位置。这些断言不读渲染，
-// 但它们是渲染层能成立的前提——点一旦是 NaN，整台机器就消失。
-// ===============================================================
+// 35) 单环 + 单喷头：所有模式都回到同一条椭圆环，只有 0 号顶部喷头
 {
-  const checkTrack = (geo, label) => {
-    configure(geo);
-    const g = geometry();
-    const a = pointAt(0);
-    const b = pointAt(g.L * 0.999999);
-    ok(Math.hypot(a.x - b.x, a.y - b.y) < 0.05, `${label}：弧长参数化闭合`);
-
-    let bad = 0;
-    for (let i = 0; i < g.N; i++) {
-      const s = i * g.D;
-      const p = pointAt(s);
-      const t = tangentAt(s);
-      const n = normalAt(s);
-      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) bad++;
-      if (Math.abs(Math.hypot(t.x, t.y) - 1) > 0.02) bad++;
-      if (Math.abs(Math.hypot(n.x, n.y) - 1) > 0.02) bad++;
-    }
-    ok(bad === 0, `${label}：${g.N} 个槽位的点 / 切向 / 法向都有效`);
-    return g;
-  };
-
-  // 35) 椭圆：原有行为不能动
-  {
-    const g = checkTrack({ rule: 'oval', r: 4, c: 6, n: 28 }, '椭圆');
-    ok(Math.abs(g.L - (4 * 6 + 2 * Math.PI * 4)) < 1e-9, '椭圆总长公式不变');
-    ok(PULLEYS.length === 2 && PULLEYS[0].r === PULLEYS[1].r, '椭圆两个等径轮');
-  }
-
-  // 36) 8 字：交叉槽、炮口锚点、上下层槽位
-  {
-    const g = checkTrack({ rule: 'figure8', r: 4.2, c: 5.2, n: 34 }, '8字交叉');
-    const p0 = pointAt(0);
-    ok(Math.hypot(p0.x, p0.y) < 1e-9, '8 字槽位 0 精确落在交叉口');
-    ok(CROSS_SLOTS.length === 2, `找到两个交叉槽（${CROSS_SLOTS.join(' / ')}）`);
-    ok(NOZZLE_SLOTS[0] === 0, '8 字炮口锁定交叉槽 0');
-    ok(NOZZLE_ANCHOR && NOZZLE_ANCHOR.x === 0 && NOZZLE_ANCHOR.y === 0,
-      '8 字炮口锚点在交叉口原点');
-    ok(BOUND.x > 7 && BOUND.y > 3, '8 字包围盒覆盖左右两个环');
-    ok(g.L > 40, `8 字总长足够容纳两个环（${g.L.toFixed(1)}）`);
-  }
-
-  // 37) 大小轮：半径差、左右外侧炮口、包围盒居中
-  {
-    const g = checkTrack({ rule: 'uneven', r: 5, r2: 2.5, c: 6, n: 36 }, '大小轮');
-    ok(PULLEYS.length === 2 && Math.abs(PULLEYS[0].r - 5) < 1e-9
-      && Math.abs(PULLEYS[1].r - 2.5) < 1e-9, '大小轮半径 5 / 2.5');
-    ok(NOZZLE_SLOTS.length === 2, '大小轮两个射口');
-    const nA = normalAt(NOZZLE_SLOTS[0] * g.D);
-    const nB = normalAt(NOZZLE_SLOTS[1] * g.D);
-    ok(nA.y < -0.5 && nB.y > 0.5, '两个炮口分别朝上 / 朝下（都在皮带外侧）');
-    ok(Math.abs(BOUND.x0 + BOUND.x1) < 0.2, '大小轮包围盒水平居中');
-  }
-
-  // 38) 三角链：三个轮、三个上半圈炮口
-  {
-    const g = checkTrack({ rule: 'tri', r: 2.4, c: 5.2, n: 36 }, '三轮三角');
-    ok(PULLEYS.length === 3, '三个齿轮');
-    ok(NOZZLE_SLOTS.length === 3, '三角链三个射口');
-    ok(NOZZLE_SLOTS.every((o) => pointAt(o * g.D).y < 0), '三个炮口都在上半圈');
-    ok(BOUND.y > 5 && BOUND.x > 6, '三角链包围盒覆盖三角形');
-  }
-
-  // 39) 隐藏拓扑注册 + 零新按键可玩
-  {
-    ok(MODES.length === 9, `模式总数 9（${MODES.length}）`);
-    ok(MODES.filter((m) => m.hidden).length === 3, '隐藏拓扑 3 个');
-    for (const id of ['figure8', 'uneven', 'tri']) {
-      const mode = getMode(id);
-      const g = new Game(9100, id);
-      ok(g.nozzleOff.length === mode.layout, `${id}：射口数量与 layout 一致`);
-      ok(g.nozzleOff.every((o) => {
-        const p = pointAt(o * D);
-        return Number.isFinite(p.x) && Number.isFinite(p.y);
-      }), `${id}：射口槽位坐标有效`);
-      for (let f = 0; f < 120 * 12; f++) {
-        g.setInput(botInput(g));
-        g.step(1 / 120);
-        g.drainEvents();
-        if (g.dead) break;
-      }
-      ok(Number.isFinite(g.phase) && g.phase >= 0 && g.phase < N,
-        `${id}：12 秒机器人运行后相位仍在 [0,N)`);
-      ok(g.occupied() <= N, `${id}：占用不超过格数`);
-    }
+  for (const id of ['standard', 'mini', 'grand', 'dice', 'poker']) {
+    const g = new Game(9200, id);
+    ok(g.mode.layout === 1, `${id}：layout = 1`);
+    ok(g.nozzleOff.length === 1 && g.nozzleOff[0] === 0, `${id}：只有 0 号顶部喷头`);
+    ok(g.queues.length === 1, `${id}：只有一个待发队列`);
+    ok(g.nozzleCount() === 1, `${id}：nozzleCount = 1`);
+    ok(!g.mode.geo.rule, `${id}：不再使用拓扑变体`);
   }
 }
 
-// ===============================================================
-// 规则审计回归断言（40~45）
-// ===============================================================
+// 36) 两种出球模式：定时 / 音乐节拍
 {
-  const C = (rank, suit) => cardCi(rank, suit);
+  ok(Math.abs(musicBpmAt(0) - 88) < 1e-9 && Math.abs(musicBpmAt(1) - 148) < 1e-9,
+    '音乐 BPM 曲线从 88 走到 148');
 
-  // 40) 扑克 5 张皇家同花顺不被普通 5 连顺覆盖，且整段 5 张完整消除
-  {
-    const royal = [C(0, 0), C(1, 0), C(2, 0), C(3, 0), C(4, 0)];
-    const h = handOfWindow(royal);
-    ok(h && h.kind === 'straightflush' && h.value === 5000,
-      `5 张皇家同花顺保持 straightflush 且值 5000（得到 ${h && h.kind} ${h && h.value}）`);
-    const sf4 = handOfWindow(royal.slice(0, 4));
-    ok(sf4 && sf4.kind === 'straightflush' && sf4.value === 3200,
-      `4 张同花顺值 3200（得到 ${sf4 && sf4.kind} ${sf4 && sf4.value}）`);
+  const t = new Game(9300, 'standard', 'timer');
+  t.step(1 / 120);
+  ok(t.fireMode === 'timer' && t.musicBpm === 0, '定时模式不产生音乐 BPM');
 
-    const g = new Game(301, 'poker');
-    g.slots.fill(null);
-    royal.forEach((ci, i) => { g.slots[mod(8 + i, N)] = g.makeBead(ci); });
-    g.drainEvents();
-    g.resolve(-1, 0);
-    const cl = g.drainEvents().find((e) => e.type === 'clear');
-    ok(cl && cl.kind === 'straightflush' && cl.matchLen === 5 && g.occupied() === 0,
-      `皇家同花顺整段清掉 5 张不留尾牌（matchLen=${cl && cl.matchLen}, 剩 ${g.occupied()}）`);
+  const m = new Game(9301, 'standard', 'music');
+  m.step(1 / 120);
+  ok(m.fireMode === 'music' && m.musicBpm >= 88 && m.musicBpm <= 89,
+    `音乐模式起手 BPM ≈ 88（${m.musicBpm.toFixed(1)}）`);
+  ok(Math.abs(m.beat - 2 * 60 / m.musicBpm) < 1e-9,
+    `音乐模式颗间隔 = 半小节（${m.beat.toFixed(2)}s）`);
+
+  // 用机器人跑 30 秒，量出球间隔确实随 BPM 变快变慢。
+  const r = new Game(9302, 'standard', 'music');
+  const fires = [];
+  for (let f = 0; f < 120 * 30; f++) {
+    r.setInput(botInput(r));
+    r.step(1 / 120);
+    for (const e of r.drainEvents()) if (e.type === 'fire') fires.push(r.time);
+    if (r.dead) break;
   }
+  const gaps = fires.slice(1).map((x, i) => x - fires[i]);
+  ok(gaps.length >= 5, `音乐模式 30 秒内出球 ${gaps.length + 1} 次`);
+  ok(gaps.length > 1 && Math.max(...gaps) - Math.min(...gaps) > 0.08,
+    `出球间隔有快慢（${Math.min(...gaps).toFixed(2)} ~ ${Math.max(...gaps).toFixed(2)}s）`);
+  ok(m.musicBeatPhase >= 0 && m.musicBeatPhase < 1, '拍相位在 [0,1)');
+  ok(t.musicBeatPhase === 0, '定时模式拍相位为 0');
+}
 
-  // 41) 颜色模式万能球落入已占槽时考虑被推挤的 slots[k]
-  {
-    const g = new Game(302, 'standard');
-    g.slots.fill(null);
-    // 左侧塞满使最近空位在右侧（p=3 < q），6 号槽红球会被推到 7 号槽
-    [0, 1, 0, 2, 2, 3, 3].forEach((ci, i) => { g.slots[2 + i] = g.makeBead(ci); });
-    // slots[5]=2(红), slots[6]=2(红), slots[7]=3(青), slots[8]=3(青), slots[9]=null
-    g.drainEvents();
-    g.dropAt(6, WILD, 0);
-    const cl = g.drainEvents().find((e) => e.type === 'clear');
-    ok(cl && cl.matchLen === 3 && cl.colors.every((c) => c === 2),
-      `万能球落入已占红槽向右推挤时定型为红并完成三消（cleared=${cl && cl.matchLen}）`);
-  }
+// 37) 四层音画映射：角度档位 → 五声音阶音高 + 声像
+{
+  ok(AIM_FREQS.length === 7, '角度档位是 7 个');
+  ok(aimFreqStep(0) === 261.63 && aimFreqStep(3) === 392.00 && aimFreqStep(6) === 659.25,
+    '两端 C4 / 中心 G4 / 右端 E5');
+  ok(Math.abs(aimPanStep(0) + 0.65) < 1e-9 && Math.abs(aimPanStep(3)) < 1e-9
+    && Math.abs(aimPanStep(6) - 0.65) < 1e-9, '声像 -0.65 / 0 / +0.65');
 
-  // 42) 骰子模式爆破红骰炸中珠子清零连漏计数，不误触发铅骰惩罚
-  {
-    const g = new Game(303, 'dice');
-    g.slots.fill(null);
-    [0, 2, 4, 1, 3, 5].forEach((ci, i) => { g.slots[8 + i] = g.makeBead(ci); });
-    g.missStreak = CFG.blankAt - 1;
-    g.drainEvents();
-    g.detonate(10, 0);
-    ok(g.missStreak === 0 && g.blanks === 0,
-      `爆破红骰命中后清零漏发计数且不塞铅骰（miss=${g.missStreak}, blanks=${g.blanks}）`);
-  }
+  const g = new Game(9400, 'standard');
+  g.setInput(1);
+  g.v = CFG.vMax;
+  g.step(1 / 120);
+  ok(g.aimStep === 6, `右满舵 → 第 6 档（${g.aimStep}）`);
+  g.fire();
+  const fe = g.drainEvents().find((e) => e.type === 'fire');
+  ok(fe && fe.root === 659.25 && Math.abs(fe.pan - 0.65) < 1e-9,
+    '开火事件带右端音高和右声像');
 
-  // 43) 骰子模式万能金骰踩 +1 翻面槽不被翻歪，踩 ×2 镀金槽仍享翻倍
-  {
-    const g = new Game(304, 'dice');
-    g.slots.fill(null);
-    g.time = 30;
-    const plusPad = g.pads.find((p) => p.kind === 'plus');
-    g.slots[mod(plusPad.slot - 2, N)] = g.makeBead(3); // 4点
-    g.slots[mod(plusPad.slot - 1, N)] = g.makeBead(3); // 4点
-    g.drainEvents();
-    g.dropAt(plusPad.slot, WILD, 0);
-    const cl = g.drainEvents().find((e) => e.type === 'clear');
-    ok(cl && cl.kind === 'same' && g.occupied() === 0,
-      `万能金骰落在 +1 槽上仍按最优 4 点凑成豹子（cleared=${cl && cl.kind}）`);
-  }
-
-  // 44) 扑克筹码槽触发小丑奖励时同时跨连消档位，单次结算至多发 1 颗奖励
-  {
-    const g = new Game(305, 'poker');
-    g.slots.fill(null);
-    g.time = 60;
-    g.combo = 5;
-    g.comboT = 60;
-    g.comboTier = 1;
-    const chip = g.pads.find((p) => p.kind === 'chip');
-    for (let i = 0; i < 3; i++) g.slots[mod(chip.slot + i, N)] = g.makeBead(C(2, i));
-    g.drainEvents();
-    g.resolve(-1, 0);
-    const revs = g.drainEvents().filter((e) => e.type === 'reward');
-    ok(revs.length === 1 && revs[0].ci === WILD && g.queues[0].length === 3,
-      `筹码槽 + 跨连消档单次只发 1 颗小丑奖励（发了 ${revs.length} 颗）`);
-  }
-
-  // 45) 整环 N 格全同色时 findMatch 仍能正确识别整环可消
-  {
-    const g = new Game(306, 'standard');
-    for (let i = 0; i < N; i++) g.slots[i] = g.makeBead(1);
-    const m = g.findMatch();
-    ok(m && m.len === N, `整环全同色正确识别为长度 ${N} 的可消段（得到 ${m && m.len}）`);
-  }
+  g.slots.fill(null);
+  [0, 0, 0].forEach((ci, i) => { g.slots[4 + i] = g.makeBead(ci); });
+  g.drainEvents();
+  g.resolve(-1, 0, false);
+  const ce = g.drainEvents().find((e) => e.type === 'clear');
+  ok(ce && ce.root === 659.25 && Math.abs(ce.pan - 0.65) < 1e-9,
+    '消除事件沿用上一发的根音与声像');
 }
 
 console.log(bad ? `\n失败 ${bad} 项` : '\n全部通过');

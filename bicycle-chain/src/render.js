@@ -5,10 +5,7 @@
 // + 3 特殊球（彩虹星晶 / 机械雷 / 锈铁块），7 个剪影互不相似。
 // 色相退成第二编码，所以高对比模式（V 键）只需要加强图底分离，不需要额外形符。
 
-import {
-  C, R, L, N, D, pointAt, tangentAt, normalAt, mod,
-  RULE as TRACK_RULE, BOUND, PULLEYS, NOZZLE_ANCHOR, CROSS_SLOTS,
-} from './geom.js';
+import { C, R, L, N, D, pointAt, tangentAt, normalAt, mod } from './geom.js';
 import { PALETTE, CFG, comboMult, comboTierIndex, COMBO_TIERS, TEMPO_MARKS, ballSkin, rulesOf, RUST, WILD, BOMB } from './sim.js';
 import { PIPS, pipOf, isFlipDie } from './dice.js';
 import {
@@ -46,54 +43,30 @@ let CHANNEL_W = 33;
 let NOZ_STAND = 4.5;      // 炮口离跑道中心线的距离（世界单位），由 CFG.nozzleGap 同步
 let IMPACTS = [];
 let NOZZLES = [];
-let TRACK_PTS = [];     // 非椭圆拓扑的屏幕空间采样点（含法向），每帧复用
 let geoKey = '';
 
 function syncGeo(game) {
-  const key = `${game.modeId}:${N}:${C}:${R}:${TRACK_RULE}`;
+  const key = `${game.modeId}:${N}:${C}:${R}`;
   if (key === geoKey) return;
   geoKey = key;
 
   // 三个约束取最小，别只用一个魔法数：
   //   34    —— 再大珠子就顶到左右 HUD 的边距了
-  //   261/(boundY+stand) —— 纵向预算：炮口 + 炮身 + 顶部挂板（合计约 109px）
-  //   790/(2·boundX)     —— 横向预算：导轨外沿不能压到左右 HUD 栏
-  // 新拓扑的包围盒由 geom 提供，不能再用椭圆的 C/R 推——
-  // 三角链的纵向包围盒是 6.3 而不是 R=2.4，用 R 算会把机器画到标题行上。
+  //   261/(R+stand) —— 纵向预算：炮口 + 炮身 + 顶部挂板（合计约 109px）
+  //   790/(2(C+R))  —— 横向预算：导轨外沿不能压到左右 HUD 栏
+  // stand 直接取 CFG.nozzleGap：飞行距离和屏幕上的炮口位置必须是同一个数。
   NOZ_STAND = CFG.nozzleGap;
-  S = Math.min(34, 261 / (BOUND.y + NOZ_STAND), 790 / (2 * BOUND.x));
+  S = Math.min(34, 261 / (R + NOZ_STAND), 790 / (2 * (C + R)));
   BEAD_R = (D * S) / 2 * 0.94;
   CHANNEL_W = D * S * 1.06;
-
-  // 非椭圆拓扑的轨道是任意闭合曲线，缓存一份屏幕坐标供描边用。
-  // 每帧现算 500 点 × 6 条描边会白烧 CPU，而几何在一局里是死的。
-  TRACK_PTS = [];
-  if (TRACK_RULE !== 'oval') {
-    const steps = 520;
-    for (let i = 0; i < steps; i++) {
-      const s = (i / steps) * L;
-      const p = pointAt(s);
-      const n = normalAt(s);
-      TRACK_PTS.push({
-        x: CX + p.x * S, y: CY + p.y * S,
-        nx: n.x, ny: n.y,
-      });
-    }
-  }
 
   IMPACTS = [];
   NOZZLES = [];
   for (const off of game.nozzleOff) {
     const s = mod(off, N) * D;
-    // 8 字交叉口是一个"世界锚点"，不是某个槽位的 pointAt：
-    // 交叉点被两条支线共用，用槽位坐标算会偏到斜边上。
-    const p = NOZZLE_ANCHOR ? { x: NOZZLE_ANCHOR.x, y: NOZZLE_ANCHOR.y } : pointAt(s);
-    const nrm = NOZZLE_ANCHOR
-      ? { x: NOZZLE_ANCHOR.nx, y: NOZZLE_ANCHOR.ny }
-      : normalAt(s);
-    const tan = NOZZLE_ANCHOR
-      ? { x: -nrm.y, y: nrm.x }
-      : tangentAt(s);
+    const p = pointAt(s);
+    const nrm = normalAt(s);
+    const tan = tangentAt(s);
     IMPACTS.push(p);
     // 两个点要分开：
     //   muzzle —— 炮口，也就是球真正的起飞点（轨道外 NOZ_STAND 世界单位）
@@ -147,6 +120,19 @@ export class Renderer {
 
   toScreen(p) {
     return { x: CX + p.x * S, y: CY + p.y * S };
+  }
+
+  /**
+   * 炮口的世界/屏幕位置。炮身会按 aimAngle 左右倾斜，
+   * 所以枪口不再是一个固定点——飞行轨迹和枪口闪光都必须从这里出发，
+   * 否则球会从"炮身旁边"凭空出现。
+   */
+  muzzleScreen(game, idx) {
+    const nz = NOZZLES[idx];
+    if (!nz) return null;
+    const p = this.toScreen(nz);   // pivot
+    const ang = Math.atan2(nz.nx, -nz.ny) - (game.aimAngle || 0) * Math.PI / 180;
+    return { x: p.x - Math.sin(ang) * 23, y: p.y + Math.cos(ang) * 23 };
   }
 
   begin(fx) {
@@ -225,10 +211,8 @@ export class Renderer {
     // 地面光池：机器自己往地面投的一点青蓝色反光。
     // 没有它，整个盘子像贴在黑纸上的剪贴画；有了它，下沿才"落"在地上。
     if (game) {
-      // 光池跟着拓扑的包围盒走：三角链的下沿比椭圆低，固定用 R 会让
-      // 整台机器看起来悬在地面上。
-      const bot = CY + BOUND.y * S + 18;
-      const poolR = Math.max(BOUND.x, BOUND.y) * S * 0.98;
+      const bot = CY + R * S + 18;
+      const poolR = (C + R) * S * 0.98;
       ctx.save();
       ctx.translate(CX, bot);
       ctx.scale(1, 0.26);
@@ -297,140 +281,11 @@ export class Renderer {
   // 绘制顺序是定死的：托盘 → 飞轮 → 凹槽导轨 → 机芯 → 挂板 → 珠子。
   // 飞轮必须压在托盘上、又在导轨之下，否则齿会盖住跑道边。
   chassis(game) {
-    if (TRACK_RULE === 'oval') {
-      this.plate();
-      this.flywheels(game);
-      this.groove();
-      this.core(game);
-      this.gantry(game);
-      return;
-    }
-    // 非椭圆拓扑没有"整块托盘"可填：8 字和三角链的内部是空的。
-    // 改用一条粗管沿轨道描边——它同样回答"这是台机器"，但不会把空洞填死。
-    this.tubePlate();
+    this.plate();
     this.flywheels(game);
-    this.tubeGroove();
+    this.groove();
     this.core(game);
     this.gantry(game);
-    // 交叉口压一块桥面：两条管子在中心会糊成一块，
-    // 桥面把"这是两条线交叉"重新读回来，同时给珠子一个落脚点。
-    if (TRACK_RULE === 'figure8') this.crossingDeck();
-  }
-
-  /** 8 字交叉口的桥面。画在凹槽之上、珠子之下。 */
-  crossingDeck() {
-    const ctx = this.ctx;
-    // 桥面只要盖住交叉点，不要把两条弧线一起吞掉。
-    // 1.9 倍轮径会变成一块 230px 的黑胶囊，实测把交叉口读成了"黑洞"。
-    const w = Math.max(58, R * S * 0.95);
-    const h = Math.max(20, CHANNEL_W * 0.78);
-    const rot = 0.20;
-
-    ctx.save();
-    ctx.translate(CX, CY);
-    ctx.rotate(rot);
-
-    ctx.beginPath();
-    ctx.roundRect(-w / 2, -h / 2, w, h, h * 0.42);
-    const g = ctx.createLinearGradient(0, -h / 2, 0, h / 2);
-    g.addColorStop(0, '#2A3849');
-    g.addColorStop(0.42, '#131C27');
-    g.addColorStop(1, '#070C13');
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(96,224,255,0.26)';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(-w / 2 + 10, -h / 2 + 2);
-    ctx.lineTo(w / 2 - 10, -h / 2 + 2);
-    ctx.strokeStyle = 'rgba(190,230,255,0.24)';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    this.bolt(-w / 2 + 11, 0, 2.4);
-    this.bolt(w / 2 - 11, 0, 2.4);
-    ctx.restore();
-  }
-
-  /**
-   * 沿 TRACK_PTS 描一条闭合路径。
-   * offset 是屏幕像素偏移（正 = 法向外侧），用来画双轨脊。
-   */
-  trackStroke(width, style, offset = 0) {
-    const ctx = this.ctx;
-    if (!TRACK_PTS.length) return;
-    ctx.beginPath();
-    for (let i = 0; i < TRACK_PTS.length; i++) {
-      const p = TRACK_PTS[i];
-      const x = p.x + p.nx * offset;
-      const y = p.y + p.ny * offset;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    ctx.lineWidth = width;
-    ctx.strokeStyle = style;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.stroke();
-  }
-
-  /** 非椭圆拓扑的底座：一条厚实的金属管 + 一排螺栓。 */
-  tubePlate() {
-    const ctx = this.ctx;
-    const w = CHANNEL_W + 44;
-
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.9)';
-    ctx.shadowBlur = 46;
-    ctx.shadowOffsetY = 16;
-    this.trackStroke(w, '#03060B');
-    ctx.restore();
-
-    ctx.save();
-    ctx.shadowColor = 'rgba(34,150,240,0.34)';
-    ctx.shadowBlur = 50;
-    this.trackStroke(w, '#060A12');
-    ctx.restore();
-
-    this.trackStroke(w, 'rgba(19,28,39,0.98)');
-    this.trackStroke(w - 12, 'rgba(8,13,20,0.96)');
-
-    // 受光上沿：只给外侧偏移的一小段亮线，不和整圈描边抢
-    ctx.save();
-    ctx.globalAlpha = 0.20;
-    this.trackStroke(1.6, '#BEE6FF', w * 0.48);
-    ctx.restore();
-
-    // 螺栓：沿轨道等距，落在外沿上
-    for (let i = 0; i < 14; i++) {
-      const s = (i / 14) * L;
-      const p = pointAt(s);
-      const n = normalAt(s);
-      this.bolt(CX + (p.x + n.x * (w / 2 - 9) / S) * S,
-        CY + (p.y + n.y * (w / 2 - 9) / S) * S, 3.1);
-    }
-  }
-
-  /** 非椭圆拓扑的凹槽：深槽 + 双轨脊 + 青色底光。 */
-  tubeGroove() {
-    const ctx = this.ctx;
-    this.trackStroke(CHANNEL_W, '#04070C');
-    this.trackStroke(CHANNEL_W - 5, '#0E1824');
-    this.trackStroke(CHANNEL_W * 0.52, 'rgba(3,6,11,0.86)');
-
-    for (const k of [1, -1]) {
-      this.trackStroke(3.2, 'rgba(0,0,0,0.65)', k * (CHANNEL_W * 0.42 + 2));
-      this.trackStroke(1.6, 'rgba(160,205,255,0.26)', k * CHANNEL_W * 0.42);
-    }
-
-    ctx.save();
-    ctx.shadowColor = 'rgba(60,220,255,0.85)';
-    ctx.shadowBlur = 20;
-    const a = (0.26 + 0.12 * Math.sin(this.t * 1.6)).toFixed(3);
-    this.trackStroke(2.2, `rgba(96,236,255,${a})`, -CHANNEL_W * 0.43);
-    ctx.restore();
   }
 
   /**
@@ -552,13 +407,6 @@ export class Renderer {
    * 细、暗、有结构，才不会被误读成 UI。
    */
   core(game) {
-    // 8 字的交叉枢纽已经在 flywheels 里画过了。
-    if (TRACK_RULE === 'figure8') return;
-    if (TRACK_RULE !== 'oval') {
-      this.topologyCore(game);
-      return;
-    }
-
     const ctx = this.ctx;
     const beat = game ? Math.min(1, game.beatClock / game.beat) : 0;
     const gearR = R * S * 0.66;
@@ -617,96 +465,20 @@ export class Renderer {
     ctx.restore();
   }
 
-  /** 大小轮 / 三角链的传动骨架：线速度相同，骨架只是把轮连起来。 */
-  topologyCore(game) {
-    const ctx = this.ctx;
-    if (!PULLEYS.length) return;
-    const beat = game ? Math.min(1, game.beatClock / game.beat) : 0;
-
-    const pts = PULLEYS.map((p) => this.toScreen({ x: p.x, y: p.y }));
-    const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
-    const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
-    const h = Math.max(9, R * S * 0.12);
-
-    ctx.save();
-    if (TRACK_RULE === 'uneven') {
-      // 一根轴穿过两个皮带轮中心。大小轮的半径差本身就是画面里的"变速"。
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      ctx.lineTo(pts[1].x, pts[1].y);
-      ctx.lineCap = 'round';
-      ctx.lineWidth = h;
-      ctx.strokeStyle = '#0D151F';
-      ctx.stroke();
-      ctx.lineWidth = Math.max(1, h * 0.18);
-      ctx.strokeStyle = 'rgba(170,215,255,0.20)';
-      ctx.stroke();
-    } else {
-      // 三角链：三根细辐条从重心连到三个轮，形成"三角骨架"。
-      for (const p of pts) {
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(p.x, p.y);
-        ctx.lineCap = 'round';
-        ctx.lineWidth = h * 0.7;
-        ctx.strokeStyle = '#0D151F';
-        ctx.stroke();
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = 'rgba(170,215,255,0.16)';
-        ctx.stroke();
-      }
-    }
-
-    const br = Math.max(13, R * S * 0.30);
-    ctx.beginPath();
-    ctx.arc(cx, cy, br, 0, PI2);
-    const bg = ctx.createRadialGradient(cx - br * 0.3, cy - br * 0.35, 2, cx, cy, br);
-    bg.addColorStop(0, '#3E5169');
-    bg.addColorStop(1, '#0A1019');
-    ctx.fillStyle = bg;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, br + 4 + beat * 9, 0, PI2);
-    ctx.strokeStyle = `rgba(96,224,255,${(0.06 + 0.30 * (1 - beat)).toFixed(3)})`;
-    ctx.lineWidth = 1.6;
-    ctx.shadowColor = 'rgba(80,200,255,0.6)';
-    ctx.shadowBlur = 8;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    this.bolt(cx, cy, Math.max(4, br * 0.34));
-    ctx.restore();
-  }
-
   /**
-   * 双炮挂架。两座炮并排朝同一个方向之后，它们必须看起来是**同一台机器上**
-   * 的两个炮管，而不是两个各自为战的炮台。
-   *
-   * 这里试了三稿，前两稿都是"把两门炮连起来"，都失败了：
-   *   细横梁   → 一副哑铃，两头各挂一个头；
-   *   宽机匣   → 一块 400px 的空板，两头挂两个头，中间空得像窗台板；
-   *   下垂软管 → 一根电线横跨一片空地，中间的指示灯读成"线上挂了颗珠子"。
-   * 结论是**不要连**。两门炮各装各的挂板，同向这件事由"两门炮长得一模一样、
-   * 姿态一模一样"来表达就够了——一件东西重复两次，本身就是一组。
+   * 炮口挂板。单喷头版本只画一块，让顶部的炮身看起来是吊在机器上的，
+   * 而不是凭空浮在环上方。
    */
   gantry(game) {
-    // 挂板的前提是"两门炮在同一条直道上"；新拓扑的炮口朝向不同，
-    // 硬套一块横板会读成穿模。
-    if (TRACK_RULE !== 'oval') return;
-    if (!game || game.nozzleOff.length !== 2) return;
-    const a = this.toScreen(NOZZLES[0]);
-    const b = this.toScreen(NOZZLES[1]);
-    if (Math.abs(a.y - b.y) > 8) return;   // 不在同一条直道上就不画
+    if (!game || !NOZZLES.length) return;
 
     const ctx = this.ctx;
     const pw = 64, ph = 50;
-    const cy = a.y - 61;
 
     ctx.save();
-    for (const p of [a, b]) {
+    for (const nz of NOZZLES) {
+      const p = this.toScreen(nz);
+      const cy = p.y - 61;
       // 挂板：上宽下窄的梯形，底边收进去，读起来是"吊着的"而不是"立着的"
       const inset = 7;
       ctx.beginPath();
@@ -755,66 +527,12 @@ export class Renderer {
    * 玩家按方向键时能立刻看到轮在跟手转——这是整台机器"活着"的凭据。
    */
   flywheels(game) {
-    // 8 字没有"轮"，只有一个交叉口；画一个 X 形传动枢纽。
-    if (TRACK_RULE === 'figure8') {
-      this.crossoverHub(game);
-      return;
-    }
-
+    const rr = R * S * 0.66;
     const rot = game ? (game.phase / N) * PI2 : 0;
-    for (const p of PULLEYS) {
-      // 链条线速度恒定，所以角速度 ∝ 1/r：小轮在画面里转得更快。
-      // 这不是装饰——"变速轮"三个字就是靠这个比值读出来的。
-      const spin = rot * (R / Math.max(0.1, p.r));
-      const s = this.toScreen({ x: p.x, y: p.y });
-      this.gear(s.x, s.y, p.r * S * 0.66, spin);
+    for (const sx of [-1, 1]) {
+      const p = this.toScreen({ x: sx * C, y: 0 });
+      this.gear(p.x, p.y, rr, rot);
     }
-  }
-
-  /**
-   * 8 字交叉口的传动枢纽。
-   *
-   * 它必须画在轨道**之下**：交叉口正是两条链相交的地方，枢纽压在上面
-   * 会把珠子盖掉。露出来的只有四个象限里的 X 臂和中央轴承。
-   */
-  crossoverHub(game) {
-    const ctx = this.ctx;
-    const rot = game ? (game.phase / N) * PI2 : 0;
-    const arm = Math.max(46, R * S * 1.15);
-    const w = Math.max(9, R * S * 0.16);
-
-    ctx.save();
-    ctx.translate(CX, CY);
-    ctx.rotate(rot * 0.35);
-
-    for (const a of [Math.PI / 4, -Math.PI / 4]) {
-      ctx.save();
-      ctx.rotate(a);
-      ctx.beginPath();
-      ctx.roundRect(-arm, -w / 2, arm * 2, w, w / 2);
-      const g = ctx.createLinearGradient(0, -w / 2, 0, w / 2);
-      g.addColorStop(0, '#46586F');
-      g.addColorStop(0.45, '#1A2533');
-      g.addColorStop(1, '#070C13');
-      ctx.fillStyle = g;
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    ctx.beginPath();
-    ctx.arc(0, 0, Math.max(16, R * S * 0.30), 0, PI2);
-    const bg = ctx.createRadialGradient(-6, -8, 2, 0, 0, Math.max(16, R * S * 0.30));
-    bg.addColorStop(0, '#4A5E78');
-    bg.addColorStop(1, '#080E16');
-    ctx.fillStyle = bg;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(90,200,255,0.28)';
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-    ctx.restore();
   }
 
   gear(cx, cy, r, rot) {
@@ -1103,28 +821,8 @@ export class Renderer {
       if (b) slots.push([i, b]);
     }
     const pred = this.predSlots(game);
-
-    // 8 字交叉：另一条支线也在交叉口时，把它压暗成"下层"。
-    // 两颗珠子会精确重合，不压暗的话命中环套在哪一颗上根本读不出来。
-    const dim = new Set();
-    if (TRACK_RULE === 'figure8' && CROSS_SLOTS.length > 1) {
-      const other = CROSS_SLOTS[1];
-      const ctx = this.ctx;
-      for (const [i, b] of slots) {
-        const ws = mod(i + game.phase, N);
-        const d = Math.min(Math.abs(ws - other), N - Math.abs(ws - other));
-        if (d > 0.8) continue;
-        dim.add(b.id);
-        ctx.save();
-        ctx.globalAlpha = 0.34;
-        this.drawBead(mod((i + b.dx) + game.phase, N) * D, b, 0, ui.cb);
-        ctx.restore();
-      }
-    }
-
     for (const pass of [0, 1]) {
       for (const [i, b] of slots) {
-        if (dim.has(b.id)) continue;
         const s = mod((i + b.dx) + game.phase, N) * D;
         const near = this.arrivalAlpha(game, s);
         if ((near > 0.02) !== (pass === 1)) continue;
@@ -2085,18 +1783,17 @@ export class Renderer {
     const c = ballSkin(ball.ci);
     const k = Math.min(1, ball.t / ball.dur);
 
-    const from = NOZZLES[ball.idx] || NOZZLES[0];
-    const to = IMPACTS[ball.idx] || IMPACTS[0];
+    // 从动态炮口起飞：炮身按 aimAngle 倾斜后，枪口会左右移动几像素。
+    const nz = NOZZLES[ball.idx] || NOZZLES[0];
+    const from = this.muzzleScreen(game, ball.idx)
+      || (nz ? this.toScreen({ x: nz.mx, y: nz.my }) : null);
+    const to = this.toScreen(IMPACTS[ball.idx] || IMPACTS[0]);
     if (!from || !to) return;
 
-    // 从炮口（muzzle）起飞，不是从炮身中心。距离正好等于 CFG.nozzleGap，
-    // 所以屏幕上量到的速度和 dur 是同一个数。
-    const start = { x: from.mx, y: from.my };
-
-    // 同一套路径函数：球体和尾迹必须走同一条曲线，否则尾迹会脱轨
-    const pos = (u) => this.toScreen({
-      x: start.x + (to.x - start.x) * u,
-      y: start.y + (to.y - start.y) * u,
+    // 同一套路径函数：球体和尾迹必须走同一条曲线，否则尾迹会脱轨。
+    const pos = (u) => ({
+      x: from.x + (to.x - from.x) * u,
+      y: from.y + (to.y - from.y) * u,
     });
 
     for (let i = 5; i >= 1; i--) {
@@ -2229,6 +1926,24 @@ export class Renderer {
     ctx.globalAlpha = 1;
     ctx.shadowBlur = 0;
 
+    // 充能环：绕机芯反向旋转的三段弧。它比炮口的小虹膜大一圈，
+    // 在炮身宽度之外，玩家用余光就能看出"这门炮在蓄力"。
+    if (!dimmed) {
+      ctx.save();
+      ctx.translate(0, -7);
+      ctx.rotate(this.t * (0.7 + charge * 2.6));
+      const cr = 18.5 + charge * 2.5;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc(0, 0, cr, i * PI2 / 3, i * PI2 / 3 + 0.62);
+        ctx.strokeStyle = `rgba(150,240,255,${(0.16 + 0.40 * charge).toFixed(3)})`;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // 炮口
     ctx.beginPath();
     ctx.ellipse(0, 23, 11.5, 5, 0, 0, PI2);
@@ -2295,18 +2010,8 @@ export class Renderer {
     if (!nz) return;
     const p = this.toScreen(nz);
     const head = ballSkin(game.queues[idx][0]);
-    // 只有轮到的那门炮在充能。上一版两个口共用同一个 charge 值，
-    // 齐射时没问题；轮流制下会让玩家以为两门炮都要开火。
+    // 单喷头始终在充能；charge 仍然保留，炮口光和虹膜会随节拍变亮。
     const charge = active ? Math.min(1, game.beatClock / game.beat) : 0;
-    // **不靠压暗表达待命**。
-    //
-    // 试过 0.30 / 0.45 / 0.70 / 0.78，全都失败：炮身填充是 #0A0F16 这个
-    // 接近背景的深色，任何程度的 alpha 压缩都先吃掉轮廓，最后剩一个
-    // 挂板浮在空中，或者一颗青色小三角悬在虚空里。
-    //
-    // 真正区分两门炮的是"光"：active 有炮口光晕 + 充能条 + 亮炮口环，
-    // 待命只有虚线环。所以 alpha 几乎不动（0.92 只用来区分一点点重量），
-    // 剪影永远是完整的——这也是暗场里唯一说得通的规则。
     const dim = active ? 1 : 0.92;
 
     ctx.save();
@@ -2325,36 +2030,24 @@ export class Renderer {
     ctx.restore();
 
     // 炮身：进局部坐标再画，局部 +Y 指向跑道。
-    // 这样同一个函数能被"上方单炮"和"下方复制 180°"两处复用，
-    // 而不需要两套坐标——这正是拆解图里"复制旋转 180°"那句话的代码形态。
+    // 开火瞬间沿局部 -Y 后坐，形成"炮身被弹簧推回挂板"的动作。
+    const fire = game.firePulse || 0;
+    const kick = 7 * fire;
     ctx.save();
     ctx.translate(p.x, p.y);
-    ctx.rotate(Math.atan2(nz.nx, -nz.ny));
+    // 负号：canvas 的正旋转是顺时针，而"向右瞄准"需要枪口向右。
+    const aimRad = (game.aimAngle || 0) * Math.PI / 180;
+    ctx.rotate(Math.atan2(nz.nx, -nz.ny) - aimRad);
+    ctx.translate(0, -kick);
     this.cannon(charge, head, !active);
     ctx.restore();
 
     ctx.restore();
 
-    // 轮到谁：炮口一团呼吸光。
-    //
-    // 不用"把没轮到的炮变暗"来表达轮转，因为两门炮的炮身本来就接近背景色，
-    // 再压暗就没有炮了。改成给**要开火的那门**加光——暗场里唯一能读作
-    // "正在工作"的就是光本身。光晕随充能变亮，出膛瞬间正好最亮。
-    const muzzle = this.toScreen({ x: nz.mx, y: nz.my });
-    if (active) {
-      const pulse = 0.5 + 0.5 * Math.sin(this.t * (3.4 + 5.2 * charge));
-      const R0 = 18 + 14 * charge + 2 * pulse;
-      const gg = ctx.createRadialGradient(muzzle.x, muzzle.y, 2, muzzle.x, muzzle.y, R0);
-      gg.addColorStop(0, `rgba(160,240,255,${(0.20 + 0.30 * charge).toFixed(3)})`);
-      gg.addColorStop(0.55, `rgba(96,200,255,${(0.08 + 0.12 * charge).toFixed(3)})`);
-      gg.addColorStop(1, 'rgba(80,180,255,0)');
-      ctx.fillStyle = gg;
-      ctx.beginPath();
-      ctx.arc(muzzle.x, muzzle.y, R0, 0, PI2);
-      ctx.fill();
-    }
-    // 待命不加任何额外标记。试过虚线环，但它和炮口自身的椭圆环叠在一起，
-    // 读起来像"炮口有污渍"；而"没有光"本身就是待命最干净的信号。
+    // 炮口：待机呼吸光 + 充能虹膜 + 出膛闪光 / 冲击环 / 烟。
+    // 位置随瞄准角移动，不随后坐移动——后坐是炮身，闪光在枪口。
+    const muzzle = this.muzzleScreen(game, idx) || this.toScreen({ x: nz.mx, y: nz.my });
+    this.muzzleFx(game, muzzle, nz, active, charge);
 
     // 待发球：坐在炮身凹槽里。它的 alpha **不跟 dim 走**——另一门炮虽然没轮到，
     // 但"它下一颗是什么颜色"是玩家规划两步的依据，看不清等于白给。
@@ -2386,9 +2079,127 @@ export class Renderer {
       ctx.restore();
     }
 
-    // 轮转提示：没轮到的炮口不写字，只靠变暗 + 不充能表达"再等一发"。
-    // 上一版这里写 REST（三射口轮休），现在两个口是交替开火，
-    // "休息"是错的语义——它们都会开火，只是还没轮到。
+  }
+
+  /**
+   * 炮口演出：待机呼吸光、充能虹膜、出膛闪光、冲击环和烟。
+   *
+   * firePulse 是 sim 里唯一的演出状态：出膛瞬间 1，0.30s 内衰减到 0。
+   * 所有参数都从它推导，渲染层不自己记时间——否则暂停、倍速、掉帧时
+   * 闪光会和炮身后坐错开。
+   */
+  muzzleFx(game, muzzle, nz, active, charge) {
+    const ctx = this.ctx;
+    const fire = Math.max(0, Math.min(1, game.firePulse || 0));
+    const q = 1 - fire;               // 0 = 刚出膛，1 = 完全结束
+    const pulse = 0.5 + 0.5 * Math.sin(this.t * (3.4 + 5.2 * charge));
+    // 音乐模式：炮口每拍胀一下，和 BGM 的底鼓同一个相位。
+    const beatPulse = game.fireMode === 'music'
+      ? 1 + 0.24 * Math.cos((game.musicBeatPhase || 0) * PI2)
+      : 1;
+
+    if (active) {
+      // 呼吸光：随充能变亮，出膛瞬间被闪光接管
+      const R0 = (18 + 14 * charge + 2 * pulse + 26 * fire) * beatPulse;
+      const gg = ctx.createRadialGradient(muzzle.x, muzzle.y, 2, muzzle.x, muzzle.y, R0);
+      gg.addColorStop(0, `rgba(160,240,255,${(0.20 + 0.30 * charge + 0.25 * fire).toFixed(3)})`);
+      gg.addColorStop(0.55, `rgba(96,200,255,${(0.08 + 0.12 * charge).toFixed(3)})`);
+      gg.addColorStop(1, 'rgba(80,180,255,0)');
+      ctx.fillStyle = gg;
+      ctx.beginPath();
+      ctx.arc(muzzle.x, muzzle.y, R0, 0, PI2);
+      ctx.fill();
+
+      // 充能虹膜：两圈反向旋转的圆弧，越接近满充能越亮、越收紧。
+      // 它不是装饰：弧的缺口在转，玩家不用看蓄力条也能读出"快满了"。
+      ctx.save();
+      ctx.translate(muzzle.x, muzzle.y);
+      ctx.rotate(this.t * (0.8 + charge * 2.4));
+      const ar = 13 + charge * 5;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc(0, 0, ar, i * PI2 / 3, i * PI2 / 3 + 0.78);
+        ctx.strokeStyle = `rgba(150,240,255,${(0.20 + 0.42 * charge).toFixed(3)})`;
+        ctx.lineWidth = 2.2;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+      ctx.rotate(-this.t * (1.2 + charge * 3.2) * 2);
+      for (let i = 0; i < 2; i++) {
+        ctx.beginPath();
+        ctx.arc(0, 0, 8 + charge * 3, i * Math.PI, i * Math.PI + 0.70);
+        ctx.strokeStyle = `rgba(190,250,255,${(0.12 + 0.26 * charge).toFixed(3)})`;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 蓄力核心：小但很亮，回答"下一发还有多久"
+      const orb = (3 + 5.5 * charge + 0.8 * pulse) * beatPulse;
+      const og = ctx.createRadialGradient(muzzle.x, muzzle.y, 0, muzzle.x, muzzle.y, orb);
+      og.addColorStop(0, 'rgba(255,255,255,0.95)');
+      og.addColorStop(0.45, 'rgba(150,240,255,0.75)');
+      og.addColorStop(1, 'rgba(70,180,255,0)');
+      ctx.fillStyle = og;
+      ctx.beginPath();
+      ctx.arc(muzzle.x, muzzle.y, orb, 0, PI2);
+      ctx.fill();
+    }
+
+    if (fire <= 0.01) return;
+
+    // 烟：先画，压在闪光下面；沿炮身反方向飘，不挡落点
+    for (let i = 0; i < 6; i++) {
+      const side = (i - 2.5) * 0.24;
+      const travel = q * 30;
+      const px = muzzle.x - nz.nx * travel - nz.ny * side * 26;
+      const py = muzzle.y - nz.ny * travel + nz.nx * side * 26;
+      const rr = 4 + 11 * q + (i % 3) * 1.6;
+      ctx.beginPath();
+      ctx.arc(px, py, rr, 0, PI2);
+      ctx.fillStyle = `rgba(130,170,200,${(fire * 0.10 * (1 - q * 0.4)).toFixed(3)})`;
+      ctx.fill();
+    }
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // 闪光核心
+    const R = 16 + 56 * q;
+    const g = ctx.createRadialGradient(muzzle.x, muzzle.y, 2, muzzle.x, muzzle.y, R);
+    g.addColorStop(0, `rgba(255,255,255,${fire.toFixed(3)})`);
+    g.addColorStop(0.28, `rgba(185,250,255,${(fire * 0.85).toFixed(3)})`);
+    g.addColorStop(0.62, `rgba(80,200,255,${(fire * 0.35).toFixed(3)})`);
+    g.addColorStop(1, 'rgba(40,140,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(muzzle.x, muzzle.y, R, 0, PI2);
+    ctx.fill();
+
+    // 星芒：每次出膛转一个角度，避免六发看起来像同一张贴图
+    const rot = (game.fireSeq || 0) * 0.63;
+    for (let i = 0; i < 8; i++) {
+      const a = rot + (i / 8) * PI2;
+      const len = 10 + 46 * q + (i % 2 ? 5 : 0);
+      ctx.beginPath();
+      ctx.moveTo(muzzle.x + Math.cos(a) * 4, muzzle.y + Math.sin(a) * 4);
+      ctx.lineTo(muzzle.x + Math.cos(a) * len, muzzle.y + Math.sin(a) * len);
+      ctx.strokeStyle = `rgba(220,255,255,${(fire * 0.48).toFixed(3)})`;
+      ctx.lineWidth = 1.2 + 2.2 * fire;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    // 冲击环：两圈，速度不同
+    for (const [rr, w, a] of [[12 + 62 * q, 1 + 2.6 * fire, 0.55], [8 + 34 * q, 1 + 1.6 * fire, 0.35]]) {
+      ctx.beginPath();
+      ctx.arc(muzzle.x, muzzle.y, rr, 0, PI2);
+      ctx.strokeStyle = `rgba(140,240,255,${(fire * a).toFixed(3)})`;
+      ctx.lineWidth = w;
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
   // ---------- 特效 ----------
@@ -2552,7 +2363,8 @@ export class Renderer {
     ctx.textAlign = 'center';
     ctx.font = `600 11px ${MONO}`;
     ctx.fillStyle = 'rgba(140,190,255,0.30)';
-    ctx.fillText(`${game.mode.en}　·　${game.mode.name}`, CX, 40);
+    const fireLabel = game.fireMode === 'music' ? '音乐节拍' : '定时出球';
+    ctx.fillText(`${game.mode.en}　·　${game.mode.name}　·　${fireLabel}`, CX, 40);
 
     // ---- 分数 + 段位 ----
     // 分数不再用固定白色：颜色本身就是段位信号，玩家余光扫一眼就知道"我在几档"。
@@ -3016,38 +2828,27 @@ export class Renderer {
 
     ctx.font = `400 15px ${FONT}`;
     ctx.fillStyle = ink(0.50);
-    ctx.fillText('炮口按节拍自动抛球，你只能转轮盘，把要接的那颗送到落点下。', CX, 210);
+    ctx.fillText('炮口按定时或音乐节拍自动出球，你只能转轮盘，把要接的那颗送到落点下。', CX, 210);
     ctx.font = `400 13px ${FONT}`;
     ctx.fillStyle = ink(0.30);
     ctx.fillText('连续每一拍都消除 → 连击加成；盘面塞满 → 出局。', CX, 234);
 
-    // 第 7~9 个模式是隐藏拓扑，放在标题页第 2 页。
-    // 翻页复用现有的 ← → / 1-9，不新增任何按键。
-    const start = ui.sel >= 6 ? 6 : 0;
-    const list = MODES.slice(start, start + 6);
-    const n = list.length;
-
+    const n = MODES.length;
     // 第五个模式进来之后，214 宽的卡片会把左右两边顶到画布边（1200−1134=66，
     // 一边只剩 33px）。收窄到 202 不是为了好看，是为了让最外侧的卡片
     // 仍然有 60px 的安全边——标题页在超宽屏上会按比例放大，边距不够会先出事。
-    // 第六个模式再收一档：6×178 + 5×10 = 1118，左右各留 41px。
-    const cw = n >= 6 ? 178 : n >= 5 ? 202 : 202;
-    const gap = n >= 6 ? 10 : n >= 5 ? 14 : 16;
+    const cw = n >= 5 ? 202 : 214;
+    const gap = n >= 5 ? 14 : 16;
     const total = n * cw + (n - 1) * gap;
     const x0 = CX - total / 2;
     const y0 = 268;
     const ch = 238;
-    const statFont = n >= 6 ? 10 : 11;
-
-    // 页码：它让"还有第二页"这件事在玩家按 → 之前就成立。
-    ctx.font = `600 10px ${MONO}`;
-    ctx.fillStyle = start ? 'rgba(255,176,90,0.55)' : 'rgba(140,190,255,0.30)';
-    ctx.fillText(start ? 'H I D D E N   T O P O L O G Y   ·   2 / 2' : 'B A S E   T O P O L O G Y   ·   1 / 2', CX, 252);
+    const statFont = 11;
 
     for (let i = 0; i < n; i++) {
-      const m = list[i];
+      const m = MODES[i];
       const x = x0 + i * (cw + gap);
-      const sel = start + i === ui.sel;
+      const sel = i === ui.sel;
 
       ctx.save();
       if (sel) {
@@ -3168,6 +2969,41 @@ export class Renderer {
       ctx.textAlign = 'center';
     }
 
+    // 出球模式切换：两种都复用同一个发射键，只改"什么时候出"。
+    {
+      const fy = 520, chipW = 92, chipH = 24, gap = 10;
+      const labelW = 38;
+      const totalW = labelW + chipW * 2 + gap;
+      const fx0 = CX - totalW / 2;
+
+      ctx.textAlign = 'left';
+      ctx.font = `600 11px ${FONT}`;
+      ctx.fillStyle = ink(0.34);
+      ctx.fillText('出球', fx0, fy + 16);
+
+      const chip = (x, text, on) => {
+        ctx.beginPath();
+        ctx.roundRect(x, fy, chipW, chipH, chipH / 2);
+        ctx.fillStyle = on ? 'rgba(90,200,255,0.16)' : 'rgba(255,255,255,0.03)';
+        ctx.fill();
+        ctx.strokeStyle = on ? 'rgba(110,220,255,0.75)' : 'rgba(120,180,255,0.18)';
+        ctx.lineWidth = on ? 1.5 : 1;
+        ctx.stroke();
+        ctx.textAlign = 'center';
+        ctx.font = `700 11px ${FONT}`;
+        ctx.fillStyle = on ? ink(0.95) : ink(0.45);
+        ctx.fillText(text, x + chipW / 2, fy + 16);
+      };
+      chip(fx0 + labelW, '定时', ui.fireMode === 'timer');
+      chip(fx0 + labelW + chipW + gap, '音乐节奏', ui.fireMode === 'music');
+
+      ctx.textAlign = 'left';
+      ctx.font = `500 10px ${FONT}`;
+      ctx.fillStyle = ink(0.22);
+      ctx.fillText('T 切换', fx0 + totalW + 14, fy + 16);
+      ctx.textAlign = 'center';
+    }
+
     // 球种图谱：7 种球一字排开。
     // 它同时是三件事：新手教学、形状编码的自证、以及"色弱也能玩"的说明——
     // 只要玩家一眼看出这 7 个不是同一个圆换颜色，就会相信形状可以当线索用。
@@ -3229,9 +3065,7 @@ export class Renderer {
     ctx.font = `500 12px ${FONT}`;
     ctx.fillStyle = ink(0.32);
     ctx.fillText(
-      ui.sel >= 6
-        ? '← → 选模式　·　7 - 9 隐藏拓扑　·　1 - 6 基础模式　·　V 高对比　·　M 静音'
-        : '← → 选模式　·　1 - 9 直选　·　7 - 9 隐藏拓扑　·　V 高对比　·　M 静音',
+      `← → 选模式　·　1 - ${MODES.length} 直选　·　V 高对比　·　M 静音`,
       CX, 594
     );
   }

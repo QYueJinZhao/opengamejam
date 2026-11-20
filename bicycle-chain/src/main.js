@@ -39,6 +39,18 @@ function saveBest(id, score) {
   } catch { return loadBests(); }
 }
 
+// 出球模式：定时（原来的时间/分数曲线）或音乐节拍（半小节一颗）。
+// 存在 localStorage，下次打开沿用；?fire=music 可直接覆盖。
+const FIRE_KEY = 'bcj.fire.v1';
+function loadFireMode() {
+  const q = params.get('fire');
+  if (q === 'music' || q === 'timer') return q;
+  try { return localStorage.getItem(FIRE_KEY) === 'music' ? 'music' : 'timer'; } catch { return 'timer'; }
+}
+function saveFireMode(m) {
+  try { localStorage.setItem(FIRE_KEY, m); } catch { /* 隐私模式下忽略 */ }
+}
+
 const ui = {
   mode: 'title',
   t: 0,
@@ -49,11 +61,12 @@ const ui = {
   cb: params.get('cb') === '1',
   muted: false,
   deadAt: 0,
+  fireMode: loadFireMode(),
 };
 
 const fx = { parts: [], floats: [], shocks: [], beams: [], ghosts: [], flash: 0, shake: 0, glow: null };
 
-let game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id);
+let game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id, ui.fireMode);
 
 // ?combo=N 把连消直接顶到 N 并停住。这个开关只有一个用途：单独看某一档的
 // 演出长什么样。连消是时效性的，靠实战截图撞某一档要碰运气，
@@ -61,6 +74,7 @@ let game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id);
 const comboParam = Number(params.get('combo') || 0);
 let paused = false;
 let silent = false;
+let chargeCue = false;   // 这一拍是否已经播过"充能近满"提示
 
 // ---------- 特效 ----------
 // 消除的粒子。速度与寿命是一起调的，不能只加寿命：
@@ -139,9 +153,8 @@ function beam(s0, span, dur, color, w = 8) {
 function handleEvents() {
   for (const e of game.drainEvents()) {
     if (e.type === 'fire') {
-      // 按口编号给音高：轮流发射时，两个口交替出球，音高跟着交替，
-      // 玩家不看屏幕也能听出"这一发是左边那门还是右边那门"。
-      if (!silent) sfx.fire(e.idx || 0);
+      if (!silent) sfx.fire(e.idx || 0, e.colors && e.colors[0], e.root, e.pan);
+      chargeCue = false;
     } else if (e.type === 'insert') {
       if (!silent) (e.snapped ? sfx.snap() : sfx.click());
       const p = arcToScreen(e.s);
@@ -214,7 +227,7 @@ function handleEvents() {
 
       fx.shake = Math.min(30, fx.shake + 2.2 + e.chain * 2.4 + Math.min(6, e.combo * 0.3) + rank * 3);
       fx.flash = Math.min(0.5, fx.flash + 0.03 + e.chain * 0.02 + rank * 0.05);
-      if (!silent) sfx.clear(e.chain, e.combo, e.jackpot ? 3 : rank, e.kind, e.matchLen);
+      if (!silent) sfx.clear(e.chain, e.combo, e.jackpot ? 3 : rank, e.kind, e.matchLen, e.root, e.pan);
     } else if (e.type === 'bomb') {
       // 爆破球：演出必须比三消更"钝"。三消是清脆的（光带 + 琶音），
       // 爆破是低频的（大冲击波 + 慢闪 + 闷响），两者靠质感区分而不是靠音量。
@@ -265,21 +278,12 @@ function handleEvents() {
       fx.flash = Math.min(0.5, fx.flash + 0.16);
       fx.shake = Math.min(34, fx.shake + 10);
       float(`狂热 ×${(e.mult || 2).toFixed(1)}  ${e.add > 0 ? `+${e.add.toFixed(0)}s` : ''}`, 600, 340, 26, '#FFB45A');
-      if (!silent) sfx.tierUp(3);
+      if (!silent) sfx.frenzy(e.root, e.pan);
     } else if (e.type === 'blank') {
       const p = arcToScreen(e.s);
       shock(p.x, p.y, 3, 22, 0.3, 'rgba(150,140,125,ALPHA)', 2);
       float(game.rules === 'poker' ? '暗牌' : '铅骰', p.x, p.y - 26, 13, 'rgba(198,188,174,0.9)');
       if (!silent) sfx.clank();
-    } else if (e.type === 'sync') {
-      // 双响同点：两台炮同时换上最该打的点数。位置贴在画面中心，
-      // 因为这是"机器给的一次福利"，属于全局事件，不属于某一块盘面。
-      float(`双响同点 · ${e.pip}`, 600, 620, 20, '#2FE6C8');
-      for (const off of e.offs) {
-        const p = arcToScreen(mod(off + game.phase, N) * D);
-        shock(p.x, p.y, 4, 46, 0.45, 'rgba(47,230,200,ALPHA)', 2.4);
-      }
-      if (!silent) sfx.confirm();
     } else if (e.type === 'bonus') {
       // 续时：写在计时器右边，属于仪表盘读数，不抢画面中心
       float(`续时 +${e.add.toFixed(1)}s`, 300, 236, 17, '#78EBFF');
@@ -382,6 +386,16 @@ function stepOnce() {
   handleEvents();
   checkTier();
 
+  // 充能近满：只播一次，出膛事件里复位。放在 stepOnce 里而不是渲染里，
+  // 是为了让音频和固定步长同一个时钟——掉帧时不会连响。
+  if (!game.balls.length && !game.dead) {
+    const ch = Math.min(1, game.beatClock / game.beat);
+    if (ch >= 0.78 && !chargeCue) {
+      chargeCue = true;
+      if (!silent) sfx.chargeReady();
+    }
+  }
+
   const n = game.nozzleCount();
   if (n !== lastNozzles) {
     lastNozzles = n;
@@ -465,7 +479,11 @@ function frame(now) {
   sfx.setIntensity(load);
   // 音乐跟着机器一起加速。没有这一下，HUD 上写着 ×1.45、耳朵听到的还是同一首歌，
   // "机器变快了"就只是仪表盘上的一个数字——而节奏感首先是**听**出来的。
-  sfx.setTempo(game ? game.tempo : 0);
+  if (game && game.fireMode === 'music' && game.musicBpm > 0) {
+    sfx.setBpm(game.musicBpm);
+  } else {
+    sfx.setTempo(game ? game.tempo : 0);
+  }
   sfx.update();
 
   renderer.draw(game, ui, fx);
@@ -522,7 +540,7 @@ function resetFx() {
 function startRun(idx) {
   ui.sel = idx;
   const mode = MODES[idx];
-  game = new Game(seedParam || ((Date.now() & 0xffff) + 1), mode.id);
+  game = new Game(seedParam || ((Date.now() & 0xffff) + 1), mode.id, ui.fireMode);
   resetFx();
   acc = 0;
   paused = false;
@@ -530,9 +548,11 @@ function startRun(idx) {
   ui.mode = 'play';
   ui.newBest = false;
   lastTier = 0;
+  chargeCue = false;
   ui.best = ui.bests[mode.id] || 0;
   sfx.init();
-  sfx.setTempo(0);
+  if (ui.fireMode === 'music') sfx.setBpm(game.musicBpm || 88);
+  else sfx.setTempo(0);
   sfx.start();
   sfx.startMusic();
 }
@@ -545,13 +565,17 @@ function startRun(idx) {
  * 盘面和图鉴会各自按不同的规则上色，玩家看到的是两个模式的混合体。
  * 重建的代价只有一次数组分配，换来的是"选什么就看到什么"。
  */
+function rebuildPreview() {
+  game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id, ui.fireMode);
+  resetFx();
+  lastNozzles = game.nozzleCount();
+}
+
 function previewMode(idx) {
   if (idx === ui.sel && ui.mode === 'title') return;
   ui.sel = (idx + MODES.length) % MODES.length;
   if (ui.mode !== 'title') return;
-  game = new Game(seedParam || ((Date.now() & 0xffff) + 1), MODES[ui.sel].id);
-  resetFx();
-  lastNozzles = game.nozzleCount();
+  rebuildPreview();
 }
 
 function toTitle() {
@@ -594,6 +618,11 @@ window.addEventListener('keydown', (e) => {
     } else if (/^Digit[1-9]$/.test(e.code)) {
       const i = Number(e.code.slice(5)) - 1;
       if (i < MODES.length) { previewMode(i); sfx.select(); }
+    } else if (e.code === 'KeyT') {
+      ui.fireMode = ui.fireMode === 'music' ? 'timer' : 'music';
+      saveFireMode(ui.fireMode);
+      rebuildPreview();
+      sfx.select();
     } else if (e.code === 'Space' || e.code === 'Enter') {
       startRun(ui.sel);
     }
@@ -641,12 +670,12 @@ document.addEventListener('visibilitychange', () => {
 
 // 调试：?auto=1 直接开局，?ff=秒 快进，?mode=id 指定模式
 if (params.get('auto') === '1') {
-  game = new Game(seedParam || 7, MODES[ui.sel].id);
+  game = new Game(seedParam || 7, MODES[ui.sel].id, ui.fireMode);
   ui.mode = 'play';
 }
 if (ffParam > 0) {
   if (ui.mode !== 'play') {
-    game = new Game(seedParam || 7, MODES[ui.sel].id);
+    game = new Game(seedParam || 7, MODES[ui.sel].id, ui.fireMode);
     ui.mode = 'play';
   }
   silent = true;
@@ -676,6 +705,31 @@ if (ffParam > 0) {
   // 注意不能叫 ?hold=，那个参数已经被"把球钉在飞行进度"占用了。
   if (params.get('held') === '1') {
     game.holdNext();
+    paused = true;
+  }
+
+  // ?pulse=0.45 把炮口闪光冻结在衰减中的某一帧。
+  // 闪光只有 0.3 秒，靠快进撞帧撞不到；这个开关让"星芒/冲击环/烟"
+  // 三层的构图可以被静态截图检查。
+  const pulseParam = Number(params.get('pulse') ?? -1);
+  if (pulseParam >= 0) {
+    game.firePulse = Math.max(0, Math.min(1, pulseParam));
+    paused = true;
+  }
+
+  // ?charge=0.95 把充能冻结在指定比例，截图检查虹膜/蓄力核心。
+  const chargeParam = Number(params.get('charge') ?? -1);
+  if (chargeParam >= 0) {
+    game.beatClock = game.beat * Math.max(0, Math.min(1, chargeParam));
+    paused = true;
+  }
+
+  // ?aim=24 把炮身冻结在指定瞄准角，截图检查左右倾斜与枪口位移。
+  const aimParam = Number(params.get('aim') ?? 999);
+  if (aimParam !== 999) {
+    const a = Math.max(-24, Math.min(24, aimParam));
+    game.aimAngle = a;
+    game.aimStep = Math.max(0, Math.min(6, Math.round((a + 24) / 8)));
     paused = true;
   }
 
