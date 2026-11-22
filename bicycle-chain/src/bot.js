@@ -9,9 +9,6 @@
 
 import { CFG, PALETTE, WILD, BOMB } from './sim.js';
 import { isPip, pipOf, evalPlacement } from './dice.js';
-import {
-  isPokerCard, cardCi, evalPlacement as evalCardPlacement,
-} from './poker.js';
 import { N, mod } from './geom.js';
 
 /** 一个槽位对某色的收益：贴边 30、隔一 12、夹心 80、同色叠 15 */
@@ -38,32 +35,6 @@ function evalColor(at, k, ci) {
  * 两套评分不需要互相可比——它们各自只在自己的模式里排序。
  */
 export function evalSlot(at, k, ci, rules = 'color') {
-  if (rules === 'poker') {
-    if (isPokerCard(ci)) {
-      // 小丑牌落地后仍是万能：取 20 张牌里最好的落点收益，打九折——
-      // 它比手里攥着的那张真牌弱一点，因为牌型要等它落地才成立。
-      if (ci === WILD) {
-        let best = -1e9;
-        for (let rank = 0; rank < 5; rank++) {
-          for (let suit = 0; suit < 4; suit++) {
-            best = Math.max(best, evalCardPlacement(at, N, k, cardCi(rank, suit), at(k) !== null));
-          }
-        }
-        return best * 0.9;
-      }
-      // 爆破王牌按 A 计，花色任意：取四种花色里最好的那一种。
-      if (ci === BOMB) {
-        let best = -1e9;
-        for (let suit = 0; suit < 4; suit++) {
-          best = Math.max(best, evalCardPlacement(at, N, k, cardCi(4, suit), at(k) !== null));
-        }
-        return best;
-      }
-      return evalCardPlacement(at, N, k, ci, at(k) !== null);
-    }
-    return -80;   // 暗牌：谁都不想要，但要让它"有地方可去"，不能是 -inf
-  }
-
   if (rules === 'dice') {
     if (isPip(ci)) return evalPlacement(at, N, k, ci, at(k) !== null);
     if (ci === WILD) {
@@ -105,11 +76,7 @@ function flyingBall(game) {
  * 朝目标相位转。控制律只有这一份，oracle 和人类模型共用——
  * 否则两边的手感会悄悄分叉，量出来的差异就分不清是"瞄准水平"还是"控制器不同"。
  *
- * 精确反解：求 v 使 coast(v,T) = gap。
- * coast(v,T) = drift·T + (v−drift)·(1−e^{−kT})/k  ⇒  v = drift + (gap − drift·T)·k/(1−e^{−kT})
- *
- * 以前用的是 `nv = drift + err/T` 这个一阶近似。它把 drift 当成了"基础推进力"，
- * 所以一旦把 drift 调小，机器人会跟着变笨——那是控制律的缺陷，不是游戏变难。
+ * 用滑行预测校正当前速度，使松开转向后接近目标相位。
  */
 function steer(game, targetPhase) {
   const flying = flyingBall(game);
@@ -122,17 +89,16 @@ function steer(game, targetPhase) {
   // 而 0.30 的下限会让它在最后一段按"还有 0.3 秒"去解，反而转过头。
   const T = flying
     ? Math.max(0.06, game.flightLeft())
-    : Math.max(0.30, (game.beat - game.beatClock) + game.flightDur);
+    : Math.max(0.30, game.nextFireIn() + game.flightDur);
 
   let gap = targetPhase - game.phase;
   while (gap > N / 2) gap -= N;
   while (gap < -N / 2) gap += N;
 
-  const k = CFG.dampK, drift = CFG.drift;
-  const decay = 1 - Math.exp(-k * T);
-  const nv = Math.max(-CFG.vMax, Math.min(CFG.vMax, drift + (gap - drift * T) * k / decay));
-  if (nv > game.v + 0.45) return 1;
-  if (nv < game.v - 0.45) return -1;
+  const error = gap - game.coastDistance(T);
+  const tolerance = 0.45 * -Math.expm1(-CFG.dampK * T) / CFG.dampK;
+  if (error > tolerance) return 1;
+  if (error < -tolerance) return -1;
   return 0;
 }
 
@@ -149,17 +115,13 @@ function steer(game, targetPhase) {
 export let lastAim = 0;
 let aimQ = 0;
 let aimShot = -1;
+// 出球前"往哪边转"的滞回方向：见 botInput 里没球在飞的分支。
+let chargeDir = 1;
 
 function scoreSlot(game, at, k, ci) {
   let sc = evalSlot(at, k, ci, game.rules);
   const pad = game.padAt ? game.padAt(k) : null;
   if (!pad) return sc;
-  if (game.rules === 'poker') {
-    // 筹码槽的回报在"整段牌型"上，落点本身只值一点点——
-    // 给 45 是让机器人愿意把关键牌送进槽，但不会为了槽放弃一个更大的牌型。
-    if (isPokerCard(ci)) sc += 45;
-    return sc;
-  }
   if (isPip(ci)) sc += pad.kind === 'x2' ? 55 : 40;
   return sc;
 }
@@ -200,7 +162,9 @@ export function botInput(game) {
 
   const T = flying
     ? Math.max(0.10, game.flightLeft())
-    : Math.max(0.30, (game.beat - game.beatClock) + game.flightDur);
+    // 没球在飞时，截止时间是"再转多久出球 + 飞行"。转距驱动之后，
+    // 出球时刻由玩家的转速决定，用 beat 倒计时会系统性算错提前量。
+    : Math.max(0.30, game.nextFireIn() + game.flightDur);
   const reach = Math.min(N / 2, CFG.vMax * T * 0.94 + 0.6);
 
   let bestPhase = 0, bestSc = -1e9;
@@ -219,6 +183,21 @@ export function botInput(game) {
   }
   aimQ = bestPhase;
   lastAim = bestPhase;
+
+  // ---- 没有球在飞：先负责"把球转出来" ----
+  //
+  // 转动驱动之后，出球不再是时间到了就发生的：不转，就永远没有下一颗。
+  // 之前这里直接返回 steer()，而 steer 在"目标就在眼前"时会返回 0——
+  // 机器人于是停在原地，整局只出了 1 颗球（诊断脚本实测）。
+  //
+  if (!flying) {
+    let gap = bestPhase - game.phase;
+    while (gap > N / 2) gap -= N;
+    while (gap < -N / 2) gap += N;
+    if (gap > 0.8) chargeDir = 1;
+    else if (gap < -0.8) chargeDir = -1;
+    return chargeDir;
+  }
   return steer(game, bestPhase);
 }
 

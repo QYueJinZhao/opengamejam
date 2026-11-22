@@ -5,8 +5,65 @@
 // 所以不会随帧率漂移。强度 intensity 由盘面占用率驱动：越挤，arp 越亮、hat 越密。
 
 const PENTA = [523.25, 587.33, 659.25, 783.99, 880.0, 1046.5]; // C5 D5 E5 G5 A5 C6
-const BASS_ROOT = [110.0, 87.31, 130.81, 98.0];                // A2 F2 C3 G2
-const BASS_FIFTH = [164.81, 130.81, 196.0, 146.83];            // E3 C3 G3 D3
+
+// ---- 程序化 BGM：小星星（公有领域民谣）----
+//
+// 为什么换成它：这一版出球改成"贴着拍点出"，BGM 就必须是一条**能数拍子**
+// 的旋律。之前的 4 小节鼓组没有可唱的拍头，玩家听不出"下一拍在哪"，
+// 贴拍就变成了纯数值行为。小星星每拍一个字，听两小节就能跟着点。
+//
+// 48 拍（12 小节）＝ 完整一段：每拍一个音，'-' 表示延音（不重新起音）。
+// 速度由 bpm 决定（96 → 142），同一段旋律唱得更急，不升 key。
+const NOTE = {
+  C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23,
+  G4: 392.00, A4: 440.00, B4: 493.88, C5: 523.25,
+};
+const TWINKLE = [
+  'C4', 'C4', 'G4', 'G4', 'A4', 'A4', 'G4', '-',
+  'F4', 'F4', 'E4', 'E4', 'D4', 'D4', 'C4', '-',
+  'G4', 'G4', 'F4', 'F4', 'E4', 'E4', 'D4', '-',
+  'G4', 'G4', 'F4', 'F4', 'E4', 'E4', 'D4', '-',
+  'C4', 'C4', 'G4', 'G4', 'A4', 'A4', 'G4', '-',
+  'F4', 'F4', 'E4', 'E4', 'D4', 'D4', 'C4', '-',
+];
+// 每小节一个根音（12 小节）。只求"有低音托着"，不做和声进行。
+const TWINKLE_BASS = [
+  130.81, 174.61, 130.81, 174.61, 130.81, 174.61,
+  196.00, 130.81, 196.00, 130.81, 174.61, 130.81,
+];
+
+// 外部 CC0 样本。合成层继续负责音高 / 声像 / 连消音型；
+// 样本只补合成做不出来的材质（玻璃、金属、骰子、纸牌、UI、短乐句）。
+const ASSET_BASE = './assets/audio/';
+const SAMPLE_FILES = {
+  glassLight: 'impactGlass_light_000.ogg',
+  glassMedium: 'impactGlass_medium_000.ogg',
+  glassHeavy: 'impactGlass_heavy_000.ogg',
+  metalLight: 'impactMetal_light_000.ogg',
+  blast: 'lowFrequency_explosion_000.ogg',
+  forceField: 'forceField_000.ogg',
+  diceThrow: 'dice-throw-1.ogg',
+  cardPlace: 'card-place-1.ogg',
+  cardSlide: 'card-slide-1.ogg',
+  chipLay: 'chip-lay-1.ogg',
+  uiClick: 'click_001.ogg',
+  uiSelect: 'select_001.ogg',
+  uiConfirm: 'confirmation_001.ogg',
+  uiSwitch: 'switch_001.ogg',
+  jingleWin: 'jingles_NES00.ogg',
+  jingleEnd: 'jingles_PIZZI01.ogg',
+  bgmTitle: 'song18.mp3',
+  bgmAlt: 'song21.mp3',
+};
+
+// 两首 CC0 轻音乐：同一作者（cynicmusic）、同一调式，被第三方拼成过无缝 loop，
+// 所以按同一 BPM 锁拍。定时 90~120s 的局里两首交替，避免 49s 单曲循环听腻。
+// 程序化 BGM 仍保留为可选项（B 键），但默认用文件 BGM。
+export const BGM_PLAYLIST = [
+  { key: 'bgmTitle', bpm: 98.5, title: 'Crystal Cave' },
+  { key: 'bgmAlt',   bpm: 98.5, title: 'Mysterious Ambience' },
+];
+export const BGM_TRACK = BGM_PLAYLIST[0];
 
 export class Sfx {
   constructor() {
@@ -23,11 +80,19 @@ export class Sfx {
     this.nextStepTime = 0;
     this.musicWanted = false;
     this.stepDur = 60 / this.bpm / 2;
+    this.bufs = new Map();
+    this.assetsPromise = null;
+    this.bgmSrc = null;
+    this.bgmGain = null;
+    this.bgmFilter = null;
+    this.bgmIndex = -1;      // 当前播到播放列表第几首
+    this.bgmToken = 0;       // 每次 stop 递增，让过期的 onended 不会切歌
+    this.paused = false;
   }
 
   init() {
     if (this.ctx) {
-      if (this.ctx.state === 'suspended') this.ctx.resume();
+      if (this.ctx.state === 'suspended' && !this.paused) this.ctx.resume();
       return;
     }
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -55,7 +120,9 @@ export class Sfx {
     this.sfxBus.gain.value = 0.5;
     this.sfxBus.connect(this.master);
 
-    const len = Math.floor(this.ctx.sampleRate * 0.4);
+    // 0.6s：最长的噪声尾巴是 tierUp 的 0.45s。旧值 0.4s 会把尾巴
+    // 硬切掉 50ms，听感像"噪声提前关门"。
+    const len = Math.floor(this.ctx.sampleRate * 0.6);
     const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
@@ -104,6 +171,60 @@ export class Sfx {
     this.stepDur = 60 / this.bpm / 2;
   }
 
+  /**
+   * 预加载外部样本。失败不抛：缺样本时合成层照常工作，
+   * 游戏不会因为一个 404 变成静音。
+   */
+  loadAssets() {
+    if (this.assetsPromise) return this.assetsPromise;
+    if (!this.ctx) this.init();
+    if (!this.ctx) return Promise.resolve(null);
+    this.assetsPromise = Promise.all(Object.entries(SAMPLE_FILES).map(async ([key, file]) => {
+      try {
+        const res = await fetch(ASSET_BASE + file);
+        if (!res.ok) throw new Error(String(res.status));
+        const buf = await this.ctx.decodeAudioData(await res.arrayBuffer());
+        this.bufs.set(key, buf);
+      } catch {
+        this.bufs.set(key, null);
+      }
+    }));
+    return this.assetsPromise;
+  }
+
+  /** 播一个已加载的样本。返回 false 表示还没加载好，调用方可退回合成音。 */
+  sample(key, { gain = 0.12, pan = 0, rate = 1, at = 0 } = {}) {
+    if (!this.on) return false;
+    const buf = this.bufs.get(key);
+    if (!buf) return false;
+    const t0 = this.ctx.currentTime + at;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = Math.max(0.25, Math.min(4, rate));
+    const g = this.ctx.createGain();
+    g.gain.value = gain;
+    src.connect(g);
+    const cleanBus = this._out(g, 'sfx', pan);
+    src.onended = () => {
+      cleanBus();
+      try { src.disconnect(); g.disconnect(); } catch { /* 已断开 */ }
+    };
+    src.start(t0);
+    src.stop(t0 + buf.duration / src.playbackRate.value + 0.03);
+    return true;
+  }
+
+  /** 暂停/恢复整条音频链路。BGM 和音效都停在原地，恢复后接着播。 */
+  setPaused(p) {
+    this.paused = !!p;
+    if (!this.ctx) return;
+    if (this.paused) {
+      if (this.ctx.state === 'running') this.ctx.suspend();
+    } else if (this.ctx.state === 'suspended') {
+      this.ctx.resume();
+    }
+  }
+
   /** 节奏跨档：一个短促的上行二音，档位越高越高 */
   tempoMark(mark = 1) {
     const f = [523.25, 659.25, 880.0][Math.min(2, Math.max(0, mark - 1))];
@@ -111,7 +232,9 @@ export class Sfx {
     this.tone({ freq: f * 1.5, dur: 0.13, type: 'sine', gain: 0.045, at: 0.06 });
   }
 
-  /** 把节点接到总线；pan 非 0 时串一个 StereoPannerNode。 */
+  /** 把节点接到总线；pan 非 0 时串一个 StereoPannerNode。
+   *  返回清理函数：短音结束后必须把节点从总线上摘掉，否则 GainNode
+   *  会一直挂在 sfxBus 上（源停了但图还在），一局下来攒上千个节点。 */
   _out(node, bus = 'sfx', pan = 0) {
     const dest = bus === 'music' ? this.musicBus : this.sfxBus;
     if (pan && this.ctx.createStereoPanner) {
@@ -119,9 +242,10 @@ export class Sfx {
       p.pan.value = Math.max(-1, Math.min(1, pan));
       node.connect(p);
       p.connect(dest);
-    } else {
-      node.connect(dest);
+      return () => { try { node.disconnect(); p.disconnect(); } catch { /* 已断开 */ } };
     }
+    node.connect(dest);
+    return () => { try { node.disconnect(); } catch { /* 已断开 */ } };
   }
 
   tone({
@@ -140,15 +264,20 @@ export class Sfx {
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     osc.connect(g);
     let out = g;
+    let f = null;
     if (cutoff) {
-      const f = this.ctx.createBiquadFilter();
+      f = this.ctx.createBiquadFilter();
       f.type = 'lowpass';
       f.frequency.value = cutoff;
       f.Q.value = 0.7;
       g.connect(f);
       out = f;
     }
-    this._out(out, bus, pan);
+    const cleanBus = this._out(out, bus, pan);
+    osc.onended = () => {
+      cleanBus();
+      try { osc.disconnect(); g.disconnect(); if (f) f.disconnect(); } catch { /* 已断开 */ }
+    };
     osc.start(t0);
     osc.stop(t0 + dur + 0.03);
   }
@@ -169,7 +298,11 @@ export class Sfx {
     g.gain.setValueAtTime(Math.max(0.0002, gain), t0);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     src.connect(f); f.connect(g);
-    this._out(g, bus, pan);
+    const cleanBus = this._out(g, bus, pan);
+    src.onended = () => {
+      cleanBus();
+      try { src.disconnect(); f.disconnect(); g.disconnect(); } catch { /* 已断开 */ }
+    };
     src.start(t0);
     src.stop(t0 + dur + 0.03);
   }
@@ -187,53 +320,149 @@ export class Sfx {
     this.musicWanted = false;
   }
 
+  /**
+   * 外部 CC0 轻音乐播放列表。两首曲子等长感、同调式，交替播放避免单曲循环听腻。
+   * 走 master 而不是 musicBus：musicBus 的 0.16 是给合成鼓组留的余量，
+   * 一首成品曲子接上去会小到听不见。
+   *
+   * 音量 0.14（原来 0.26 偏吵）：轻音乐是钟声 + 琶音，高频本来就亮，
+   * 再叠上消除音效容易盖过玩家自己制造的声音。压低之后音效仍然清楚。
+   * 加一个 6.5kHz 低通把最刺耳的齿音磨掉，但保留钟声的泛音——
+   * 截止再低就会把"水晶"质感一起滤没，变闷。
+   */
+  playBgm(gain = 0.14) {
+    // 允许在 suspended 时排程：BGM 会在 resume 后从当前位置开始，
+    // 这样"加载完成时刚好暂停"不会把 BGM 永久丢掉。
+    if (!this.ctx || this.muted) return false;
+    // 每次开一首都前进一格：-1→0（首次），0→1→0…（曲末自动接歌）。
+    this.bgmIndex = (this.bgmIndex + 1) % BGM_PLAYLIST.length;
+    const track = BGM_PLAYLIST[this.bgmIndex];
+    const buf = this.bufs.get(track.key);
+    if (!buf) return false;
+    // 旧曲必须立刻停：fadeout 走 setTimeout，或在触发 BGM 切换/重开时
+    // 新旧两首同时 loop，听感是"鼓点叠了一层"（mock 实测双播后 loops=2）。
+    // 新曲自己有 0.35s 淡入，不需要旧曲再淡出。
+    // stopBgm 会递增 token 使旧曲的 onended 失效，不会重复接歌。
+    this.stopBgm(0);
+    const token = this.bgmToken;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    // 单曲播完接下一首：不用 loop（loop 会把 49s 的尾巴硬接到开头），
+    // 而是留 0.6s 淡出 + 0.35s 淡入，听感是一段完整的两曲轮换。
+    src.loop = false;
+    const g = this.ctx.createGain();
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 6500;
+    lp.Q.value = 0.5;
+    const now = this.ctx.currentTime;
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), now + 0.35);
+    src.connect(lp);
+    lp.connect(g);
+    g.connect(this.master);
+    src.start(now);
+    src.onended = () => {
+      // stopBgm 主动停时会清引用并递增 token，过期的 onended 不应再切歌。
+      if (token !== this.bgmToken || src !== this.bgmSrc) return;
+      this.playBgm(gain);
+    };
+    this.bgmSrc = src;
+    this.bgmGain = g;
+    this.bgmFilter = lp;
+    return true;
+  }
+
+  /** 当前文件 BGM 的 BPM（音乐出球锁拍用；两首同 BPM）。 */
+  get bgmBpm() {
+    const track = BGM_PLAYLIST[this.bgmIndex < 0 ? 0 : this.bgmIndex];
+    return track ? track.bpm : 0;
+  }
+
+  /** 当前文件 BGM 的曲名（HUD 显示用）。 */
+  get bgmTitle() {
+    const track = BGM_PLAYLIST[this.bgmIndex < 0 ? 0 : this.bgmIndex];
+    return track ? track.title : '';
+  }
+
+  stopBgm(fade = 0.3) {
+    const src = this.bgmSrc;
+    const g = this.bgmGain;
+    const lp = this.bgmFilter;
+    this.bgmSrc = null;
+    this.bgmGain = null;
+    this.bgmFilter = null;
+    this.bgmToken++;   // 让正在播的那首的 onended 失效，不会自动接下一首
+    if (!src || !g || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(Math.max(0.0001, g.gain.value), now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + Math.max(0.01, fade));
+    const finish = () => {
+      try { src.stop(); } catch { /* 已停止 */ }
+      try { src.disconnect(); lp?.disconnect(); g.disconnect(); } catch { /* 已断开 */ }
+    };
+    // fade=0 是"立刻换歌"：同步停掉，避免两首 BGM 同场循环。
+    if (fade <= 0.01) finish();
+    else setTimeout(finish, fade * 1000 + 80);
+  }
+
+  get bgmPlaying() {
+    return !!this.bgmSrc;
+  }
+
   /** 每帧调用：把未来 0.2 秒内的音符排出去 */
   update() {
     if (!this.on || !this.musicWanted) return;
     const now = this.ctx.currentTime;
     if (this.nextStepTime < now) this.nextStepTime = now + 0.03;
     let guard = 0;
+    const len = TWINKLE.length * 2;   // 每拍两个八分音符
     while (this.nextStepTime < now + 0.2 && guard++ < 10) {
       this.scheduleStep(this.step, this.nextStepTime - now);
-      this.step = (this.step + 1) % 32;
+      this.step = (this.step + 1) % len;
       this.nextStepTime += this.stepDur;
     }
   }
 
+  /**
+   * 小星星。旋律在拍头，反拍只有很轻的踩镲——它必须让"拍点"听得出来，
+   * 但又不能盖过消除音效（出球贴拍之后，玩家会主动去听这一下）。
+   */
   scheduleStep(step, at) {
-    const bar = step >> 3;
-    const s = step % 8;
-    const root = BASS_ROOT[bar];
-    const fifth = BASS_FIFTH[bar];
+    const beat = step >> 1;          // 第几拍（0..47）
+    const sub = step & 1;            // 0 = 拍头，1 = 反拍
+    const bar = step >> 3;           // 第几小节（0..11）
     const k = this.intensity;
+    const beatSec = 60 / this.bpm;
 
-    // 底鼓：四踩
-    if (s % 2 === 0) {
-      this.tone({ freq: 128, to: 46, dur: 0.17, type: 'sine', gain: 0.55, at, bus: 'music' });
-    }
-    // 反拍军鼓/噪声
-    if (s === 2 || s === 6) {
-      this.noise({ dur: 0.09, gain: 0.10 + 0.10 * k, freq: 1900, q: 0.7, at, bus: 'music' });
-    }
-    // 踩镲：八分，强度越高越密
-    if (s % 2 === 1 || k > 0.55) {
-      this.noise({ dur: 0.028, gain: 0.045 + 0.05 * k, freq: 8200, q: 1.1, at, bus: 'music' });
-    }
-    // 贝斯：每小节 0 / 3 / 6
-    if (s === 0 || s === 3) {
-      this.tone({ freq: root, dur: 0.24, type: 'triangle', gain: 0.34, at, bus: 'music' });
-    }
-    if (s === 6) {
-      this.tone({ freq: fifth, dur: 0.18, type: 'triangle', gain: 0.24, at, bus: 'music' });
-    }
-    // 琶音：每拍一个，强度决定亮度
-    if (s % 2 === 0) {
-      const note = PENTA[(bar * 2 + (s >> 1)) % PENTA.length] * (k > 0.7 ? 2 : 1);
-      this.tone({ freq: note, dur: 0.1, type: 'sine', gain: 0.05 + 0.06 * k, at, bus: 'music' });
-    }
-    if (k > 0.85 && s % 2 === 1) {
-      const note = PENTA[(bar + 3) % PENTA.length] * 2;
-      this.tone({ freq: note, dur: 0.07, type: 'sine', gain: 0.035, at, bus: 'music' });
+    if (sub === 0) {
+      const name = TWINKLE[beat];
+      if (name && name !== '-') {
+        const f = NOTE[name];
+        // 主旋律：triangle 的泛音少、不刺，接近玩具钢琴。
+        this.tone({
+          freq: f, dur: beatSec * 0.82, type: 'triangle',
+          gain: 0.30, at, bus: 'music',
+        });
+        // 高八度的一点点泛音：只在"音乐盒"的亮度上加一层，不构成第二个声部。
+        this.tone({
+          freq: f * 2, dur: beatSec * 0.45, type: 'sine',
+          gain: 0.045, at, bus: 'music',
+        });
+      }
+      // 轻底鼓：每拍一下，音量刻意小于旋律（原来 0.55 会把旋律压掉）。
+      this.tone({ freq: 118, to: 46, dur: 0.11, type: 'sine', gain: 0.20, at, bus: 'music' });
+      // 低音：每小节第一拍
+      if (step % 8 === 0) {
+        this.tone({
+          freq: TWINKLE_BASS[bar % TWINKLE_BASS.length],
+          dur: beatSec * 1.85, type: 'sine', gain: 0.24, at, bus: 'music',
+        });
+      }
+    } else {
+      // 反拍踩镲：强度越高越亮
+      this.noise({ dur: 0.024, gain: 0.014 + 0.032 * k, freq: 8200, q: 1.1, at, bus: 'music' });
     }
   }
 
@@ -245,6 +474,26 @@ export class Sfx {
     if (now - this.lastTick < gap) return;
     this.lastTick = now;
     this.tone({ freq: 1600 + speed * 26, dur: 0.013, type: 'square', gain: 0.018 });
+  }
+
+  // ---------- 外部样本层 ----------
+  // 只加材质，不替代音高层：角度→音高、颜色→音色仍由合成负责。
+  glass(rank = 0, pan = 0) {
+    const key = rank >= 2 ? 'glassHeavy' : rank >= 1 ? 'glassMedium' : 'glassLight';
+    return this.sample(key, { gain: rank >= 2 ? 0.20 : rank >= 1 ? 0.15 : 0.09, pan });
+  }
+
+  metal(pan = 0) { return this.sample('metalLight', { gain: 0.09, pan }); }
+  blast(pan = 0) { return this.sample('blast', { gain: 0.18, pan }); }
+  dice(pan = 0) { return this.sample('diceThrow', { gain: 0.12, pan }); }
+  card(pan = 0) { return this.sample('cardPlace', { gain: 0.10, pan }); }
+  cardSlide(pan = 0) { return this.sample('cardSlide', { gain: 0.06, pan }); }
+  chip(pan = 0) { return this.sample('chipLay', { gain: 0.10, pan }); }
+  uiClick() { return this.sample('uiClick', { gain: 0.10 }); }
+  uiConfirm() { return this.sample('uiConfirm', { gain: 0.10 }); }
+  uiSwitch() { return this.sample('uiSwitch', { gain: 0.10 }); }
+  jingle(win = false) {
+    return this.sample(win ? 'jingleWin' : 'jingleEnd', { gain: 0.22 });
   }
 
   /**
@@ -312,6 +561,7 @@ export class Sfx {
 
   /** 狂热：以当前角度为根音的大三和弦琶音 + 高频闪光。 */
   frenzy(root = 440, pan = 0) {
+    this.glass(2, pan);
     const chord = [0, 4, 7, 12, 16];
     chord.forEach((semi, i) => {
       const f = root * Math.pow(2, semi / 12);
@@ -324,14 +574,16 @@ export class Sfx {
 
   /** 充能近满：一声很轻的"上弦"，提示再过半拍就要出膛。 */
   chargeReady() {
+    this.sample('forceField', { gain: 0.05 });
     this.tone({ freq: 880, to: 1320, dur: 0.10, type: 'sine', gain: 0.022 });
     this.noise({ dur: 0.045, gain: 0.016, freq: 5200, q: 1.2 });
   }
 
-  click() { this.tone({ freq: 470, to: 300, dur: 0.05, type: 'triangle', gain: 0.08 }); }
+  click() { this.uiClick(); this.tone({ freq: 470, to: 300, dur: 0.05, type: 'triangle', gain: 0.08 }); }
 
   /** 翻面槽 / 翻面骰：一声"拨片弹过去"的上滑 + 骰子落桌 */
   flipPad() {
+    this.cardSlide();
     this.tone({ freq: 620, to: 1180, dur: 0.075, type: 'square', gain: 0.045 });
     this.noise({ dur: 0.045, gain: 0.05, freq: 3600, q: 1.1, at: 0.03 });
     this.tone({ freq: 240, to: 180, dur: 0.06, type: 'triangle', gain: 0.05, at: 0.05 });
@@ -339,6 +591,7 @@ export class Sfx {
 
   /** 爆破球：低频下坠 + 一层宽噪，要"闷"不要"脆"——脆会读成消除音 */
   boom() {
+    this.blast();
     this.tone({ freq: 96, to: 34, dur: 0.36, type: 'sine', gain: 0.30 });
     this.tone({ freq: 210, to: 80, dur: 0.16, type: 'square', gain: 0.05 });
     this.noise({ dur: 0.28, gain: 0.15, freq: 820, q: 0.55 });
@@ -346,6 +599,7 @@ export class Sfx {
 
   /** 锈球注入：金属摩擦感，短促、干、不带尾音，和任何"得分"音区分开 */
   clank() {
+    this.metal();
     this.tone({ freq: 330, to: 170, dur: 0.11, type: 'square', gain: 0.045 });
     this.noise({ dur: 0.09, gain: 0.04, freq: 2800, q: 1.5 });
   }
@@ -368,6 +622,11 @@ export class Sfx {
    * 这是整个项目里唯一一处"用音高直接映射游戏量"的地方，值得为它单开分支。
    */
   clear(chain = 1, rush = 1, rank = 0, kind = null, len = 3, root = 440, pan = 0) {
+    // 材质层：三消是玻璃、骰子是落桌、扑克是纸牌。
+    // 它先于合成音出现，负责"这一下是什么东西碎了/放下了"。
+    if (kind === 'same' || kind === 'run') this.dice(pan);
+    else if (kind) this.card(pan);
+    else this.glass(rank, pan);
     // 连消琶音：先铺在下面，再叠各规则族自己的消除音。
     // 根音来自上一发的角度档位，所以"左边打出的连锁"会从低音区起。
     if (chain >= 2) this.arpeggio(root, pan, Math.min(5, chain));
@@ -560,9 +819,13 @@ export class Sfx {
     });
   }
 
-  select() { this.tone({ freq: 720, dur: 0.045, type: 'triangle', gain: 0.05 }); }
+  select() {
+    this.uiClick();
+    this.tone({ freq: 720, dur: 0.045, type: 'triangle', gain: 0.05 });
+  }
 
   confirm() {
+    this.uiConfirm();
     this.tone({ freq: 520, dur: 0.08, type: 'triangle', gain: 0.08 });
     this.tone({ freq: 780, dur: 0.12, type: 'sine', gain: 0.06, at: 0.06 });
   }

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OVERLOAD EXPRESS</title>
+<link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <main class="shell">
+    <!-- 极简单行顶栏：品牌 | 路线选择 | 低频系统设置 -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="badge" aria-hidden="true">🚂</span>
+        <h1 id="brand-title">OVERLOAD EXPRESS</h1>
+      </div>
+
+      <nav class="level-tabs" id="level-tabs" role="tablist" aria-label="Routes"></nav>
+
+      <div class="top-actions">
+        <button id="btn-lang" type="button" class="pill pill-lang">中文</button>
+        <button id="btn-mute" type="button" class="pill">🔊 SFX</button>
+        <button id="btn-reset" type="button" class="pill">↻ Reset</button>
+      </div>
+    </header>
+
+    <!-- 主视觉舞台：独占中央弹性空间，零滚动条 -->
+    <section class="stage-wrap">
+      <canvas id="game" aria-label="OVERLOAD EXPRESS"></canvas>
+
+      <!-- 开屏标题浮层 -->
+      <div id="title-modal" class="modal">
+        <div class="modal-card title-card">
+          <div class="title-badge" id="start-badge">PHYSICS STACKING ARCADE</div>
+          <h2 id="start-title">OVERLOAD EXPRESS</h2>
+          <p id="start-sub" class="title-sub"></p>
+          <ul class="title-tips">
+            <li id="start-tip1"></li>
+            <li id="start-tip2"></li>
+          </ul>
+          <button id="btn-start" type="button" class="btn-go start-btn">🚂 START LOADING</button>
+        </div>
+      </div>
+
+      <!-- 到站结算浮层 -->
+      <div id="result-modal" class="modal" hidden>
+        <div class="modal-card">
+          <div class="rank-stamp" id="res-rank">S</div>
+          <h2 id="res-title"></h2>
+          <p class="res-big"><strong id="res-count">0</strong> <span id="res-unit"></span></p>
+          <div class="res-meta">
+            <div><span id="res-peak-lbl"></span><strong id="res-peak">0</strong></div>
+            <div><span id="res-fallen-lbl"></span><strong id="res-fallen">0</strong></div>
+            <div><span id="res-best-lbl"></span><strong id="res-best">0</strong></div>
+          </div>
+          <div class="modal-btns">
+            <button id="res-retry" type="button" class="btn-go"></button>
+            <button id="res-next" type="button" class="btn-sub"></button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 底部操作舱：按自然操作流排列 [色标人池] -> [齐扑倍率 + 顺手撤回] -> [发车/缩头主按钮] -->
+    <footer class="dock">
+      <div class="dock-pool">
+        <span class="dock-label" id="roster-lbl">Station Pool</span>
+        <div class="roster" id="roster-group"></div>
+      </div>
+
+      <div class="dock-divider" aria-hidden="true"></div>
+
+      <div class="dock-tools">
+        <span class="dock-label" id="actions-lbl">Squad &amp; Undo</span>
+        <div class="tools-row">
+          <div class="seg" id="burst-group" role="group" aria-label="Squad burst">
+            <button type="button" data-burst="1" class="active">×1</button>
+            <button type="button" data-burst="3">×3</button>
+            <button type="button" data-burst="5">×5</button>
+          </div>
+          <button id="btn-undo" type="button" class="btn-undo" title="Undo (Z)">
+            <span id="undo-txt">↶ Undo</span>
+            <kbd>Z</kbd>
+          </button>
+        </div>
+      </div>
+
+      <div class="dock-action">
+        <button id="btn-depart" type="button" class="btn-depart">
+          <span id="depart-txt">🚂 DEPART!</span>
+          <small id="depart-sub">Enter to launch</small>
+        </button>
+        <button id="btn-crouch" type="button" class="btn-crouch" hidden>
+          <span id="crouch-txt">⬇ HOLD TO DUCK</span>
+          <small id="crouch-sub">SPACE Duck · A/D Lean</small>
+        </button>
+      </div>
+    </footer>
+  </main>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

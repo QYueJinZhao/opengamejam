@@ -1,14 +1,127 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>双轮彩球蛇 · Bicycle Chain</title>
+<title>Bicycle Chain</title>
 <link rel="stylesheet" href="./src/style.css">
 </head>
 <body>
-  <canvas id="game"></canvas>
-  <noscript>需要启用 JavaScript。</noscript>
+  <main class="arcade">
+    <header class="masthead">
+      <div class="wordmark"><span class="mark" aria-hidden="true"><i></i><i></i></span><span data-text="title">Bicycle Chain</span></div>
+      <div class="settings" aria-label="Game settings" data-label="settings">
+        <button id="music" type="button" title="Switch music (B)" data-tooltip="musicTitle">Twinkle</button>
+        <button id="audio" type="button" title="Toggle sound (M)" data-tooltip="soundTitle" aria-pressed="false">Sound</button>
+        <button id="contrast" type="button" title="Toggle high contrast (V)" data-tooltip="contrastTitle" data-text="contrast" aria-pressed="false">Contrast</button>
+        <button id="language" type="button" data-text="language" data-tooltip="languageTitle" lang="zh-CN" title="Switch to Chinese">中文</button>
+      </div>
+    </header>
+
+    <div class="workbench">
+      <section class="stage" aria-labelledby="stage-title">
+        <header class="stage-head">
+          <div><h1 id="stage-title" tabindex="-1">Standard</h1><p id="stage-rule">Line up three matching pieces to clear them.</p></div>
+          <span class="stage-tag" id="stage-tag"></span>
+        </header>
+        <div class="playfield">
+          <canvas id="game" role="img" aria-label="Marble machine. Turn the track to catch pieces from the launcher." data-label="board"></canvas>
+          <section id="pause-panel" class="pause-panel" aria-labelledby="pause-title" hidden>
+            <div><h2 id="pause-title" data-text="paused">Paused</h2><button id="resume" class="primary" type="button" data-text="resume">Resume</button></div>
+          </section>
+        </div>
+        <div class="board-note" id="board-note"></div>
+        <div class="controls" aria-label="Controls" data-label="controls">
+          <button type="button" data-input="KeyA" title="Hold A or ← to accelerate left" data-tooltip="leftTitle"><span aria-hidden="true">←</span><span data-text="left">Left</span><kbd aria-hidden="true">A</kbd></button>
+          <button type="button" data-input="KeyD" title="Hold D or → to accelerate right" data-tooltip="rightTitle"><kbd aria-hidden="true">D</kbd><span data-text="right">Right</span><span aria-hidden="true">→</span></button>
+        </div>
+      </section>
+
+      <aside class="dashboard" aria-label="Modes and game stats" data-label="dashboard">
+        <section id="menu-panel" aria-labelledby="menu-title">
+          <h2 id="menu-title" data-text="selectMode">Select mode</h2>
+          <div id="mode-list" class="mode-list" role="group" aria-labelledby="menu-title"></div>
+          <p id="mode-tip" class="mode-tip"></p>
+          <div class="menu-bottom">
+            <div class="records">
+              <p class="record"><span data-text="best">Best distance</span><strong id="menu-best">—</strong></p>
+              <p class="record"><span data-text="bestClear">Best clear score</span><strong id="menu-best-clear">—</strong></p>
+            </div>
+            <button id="start" class="primary" type="button"><span data-text="start">Start game</span><span aria-hidden="true">▶</span></button>
+          </div>
+        </section>
+
+        <section id="run-panel" aria-label="Game stats" data-label="runPanel" hidden>
+          <div class="driving-stats">
+            <div class="drive-gauge" id="drive-gauge" data-drive="cruising">
+              <label class="caption" for="speed-gauge" data-text="turnSpeed">Track speed</label>
+              <div class="gauge-value"><strong id="turn-speed">0.0</strong><span data-text="speedUnit">slots/s</span></div>
+              <progress id="speed-gauge" max="1" value="0"></progress>
+              <div id="drive-state" class="drive-state"></div>
+            </div>
+            <div class="score-gauge distance-gauge">
+              <span class="caption"><span data-text="distance">Distance</span> <span id="rank" class="rank"></span></span>
+              <div class="gauge-value"><strong id="score">0.0</strong><span data-text="slots">slots</span></div>
+              <progress id="rank-bar" aria-label="Distance rank progress" data-label="rankProgress" max="1" value="0"></progress>
+            </div>
+            <div class="score-gauge clear-gauge">
+              <span class="caption"><span data-text="clearScore">Clear score</span> <span id="clear-rank" class="rank"></span></span>
+              <div class="gauge-value"><strong id="clear-score">0</strong></div>
+              <progress id="clear-rank-bar" aria-label="Clear rank progress" data-label="clearRankProgress" max="1" value="0"></progress>
+            </div>
+          </div>
+
+          <div class="queue-block">
+            <div class="launch-gauge">
+              <div class="metric"><label for="charge-bar" data-text="charge">Next launch</label><strong id="charge"></strong></div>
+              <progress id="charge-bar" max="1" value="0"></progress>
+            </div>
+            <div class="metric"><h2 data-text="upNext">Up next</h2><span id="air" class="caption"></span></div>
+            <div class="queue">
+              <div><canvas width="112" height="88"></canvas><span data-text="next">Next</span></div>
+              <div><canvas width="112" height="88"></canvas><span data-text="second">Second</span></div>
+              <div><canvas width="112" height="88"></canvas><span data-text="third">Third</span></div>
+            </div>
+          </div>
+
+          <div class="load-block">
+            <div class="metric"><label for="load-bar" data-text="occupancy">Track load</label><strong id="load"></strong></div>
+            <progress id="load-bar" max="1" value="0"></progress>
+            <p id="load-warning" data-text="warning" hidden>Track nearly full. Clear pieces to make room.</p>
+          </div>
+
+          <div class="run-details">
+            <div class="metric"><span data-text="combo">Combo</span><strong id="combo">—</strong></div>
+          </div>
+          <div class="run-actions">
+            <div><span class="caption" data-text="time">Time left</span><strong id="time" class="time">90 s</strong></div>
+            <button id="pause" class="secondary" type="button"><span data-text="pause">Pause</span> <kbd>Esc</kbd></button>
+          </div>
+        </section>
+
+        <section id="result-panel" aria-labelledby="result-title" hidden>
+          <h2 id="result-title" tabindex="-1" data-text="result">Results</h2>
+          <p id="result-reason"></p>
+          <div class="result-scores">
+            <div class="result-tile">
+              <div class="caption"><span data-text="distance">Distance</span><span id="final-rank" class="rank"></span></div>
+              <div class="score-value"><strong id="final-score" class="score"></strong><span class="score-unit" data-text="slots">slots</span></div>
+              <p id="result-next" class="caption"></p>
+            </div>
+            <div class="result-tile clear-gauge">
+              <div class="caption"><span data-text="clearScore">Clear score</span><span id="final-clear-rank" class="rank"></span></div>
+              <div class="score-value"><strong id="final-clear-score" class="score"></strong></div>
+              <p id="result-clear-next" class="caption"></p>
+            </div>
+          </div>
+          <dl id="result-stats" class="result-stats"></dl>
+          <button id="retry" class="primary" type="button"><span data-text="retry">Play again</span><span aria-hidden="true">↻</span></button>
+          <button id="change-mode" class="secondary" type="button" data-text="changeMode">Change mode</button>
+        </section>
+      </aside>
+    </div>
+  </main>
+  <noscript>Enable JavaScript to play. / 请启用 JavaScript。</noscript>
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>

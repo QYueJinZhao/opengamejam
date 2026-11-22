@@ -1,0 +1,8 @@
+{
+  "$schema": "https://opengame.io/schema/opengame.json",
+  "title": "Overload Express",
+  "description": "Pile a motley crew of rush-hour passengers onto the train, then hit GO and brace for launch jolts, bumpy rails, low tunnels and a hard stop at the terminal. Stack smart, duck on cue, and see how many you can deliver alive.",
+  "kind": "game",
+  "build": { "output": "." },
+  "controls": ["keyboard", "mouse"]
+}

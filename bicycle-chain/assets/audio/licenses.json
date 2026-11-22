@@ -1,0 +1,103 @@
+{
+  "license": "CC0 1.0 Universal (public domain dedication)",
+  "note": "所有文件均来自明确标注 CC0 的页面；CC0 不要求署名，此文件仅用于追溯来源。",
+  "files": {
+    "impactGlass_light_000.ogg": {
+      "source": "https://kenney.nl/assets/impact-sounds",
+      "author": "Kenney",
+      "pack": "Impact Sounds (2019)"
+    },
+    "impactGlass_medium_000.ogg": {
+      "source": "https://kenney.nl/assets/impact-sounds",
+      "author": "Kenney",
+      "pack": "Impact Sounds (2019)"
+    },
+    "impactGlass_heavy_000.ogg": {
+      "source": "https://kenney.nl/assets/impact-sounds",
+      "author": "Kenney",
+      "pack": "Impact Sounds (2019)"
+    },
+    "impactMetal_light_000.ogg": {
+      "source": "https://kenney.nl/assets/impact-sounds",
+      "author": "Kenney",
+      "pack": "Impact Sounds (2019)"
+    },
+    "lowFrequency_explosion_000.ogg": {
+      "source": "https://kenney.nl/assets/sci-fi-sounds",
+      "author": "Kenney",
+      "pack": "Sci-fi Sounds (2020)"
+    },
+    "forceField_000.ogg": {
+      "source": "https://kenney.nl/assets/sci-fi-sounds",
+      "author": "Kenney",
+      "pack": "Sci-fi Sounds (2020)"
+    },
+    "dice-throw-1.ogg": {
+      "source": "https://kenney.nl/assets/casino-audio",
+      "author": "Kenney",
+      "pack": "Casino Audio (2012)"
+    },
+    "card-place-1.ogg": {
+      "source": "https://kenney.nl/assets/casino-audio",
+      "author": "Kenney",
+      "pack": "Casino Audio (2012)"
+    },
+    "card-slide-1.ogg": {
+      "source": "https://kenney.nl/assets/casino-audio",
+      "author": "Kenney",
+      "pack": "Casino Audio (2012)"
+    },
+    "chip-lay-1.ogg": {
+      "source": "https://kenney.nl/assets/casino-audio",
+      "author": "Kenney",
+      "pack": "Casino Audio (2012)"
+    },
+    "click_001.ogg": {
+      "source": "https://kenney.nl/assets/interface-sounds",
+      "author": "Kenney",
+      "pack": "Interface Sounds (2020)"
+    },
+    "select_001.ogg": {
+      "source": "https://kenney.nl/assets/interface-sounds",
+      "author": "Kenney",
+      "pack": "Interface Sounds (2020)"
+    },
+    "confirmation_001.ogg": {
+      "source": "https://kenney.nl/assets/interface-sounds",
+      "author": "Kenney",
+      "pack": "Interface Sounds (2020)"
+    },
+    "switch_001.ogg": {
+      "source": "https://kenney.nl/assets/interface-sounds",
+      "author": "Kenney",
+      "pack": "Interface Sounds (2020)"
+    },
+    "jingles_NES00.ogg": {
+      "source": "https://kenney.nl/assets/music-jingles",
+      "author": "Kenney",
+      "pack": "Music Jingles (2014)"
+    },
+    "jingles_PIZZI01.ogg": {
+      "source": "https://kenney.nl/assets/music-jingles",
+      "author": "Kenney",
+      "pack": "Music Jingles (2014)"
+    },
+    "song18.mp3": {
+      "source": "https://opengameart.org/content/crystal-cave-song18",
+      "author": "cynicmusic",
+      "license": "CC0",
+      "title": "Crystal Cave (song18)",
+      "duration": "49.56s",
+      "bpm": 98.5
+    },
+    "song21.mp3": {
+      "source": "https://opengameart.org/content/mysterious-ambience-song21",
+      "author": "cynicmusic",
+      "license": "CC0",
+      "title": "Mysterious Ambience (song21)",
+      "duration": "42.91s",
+      "bpm": 98.5,
+      "note": "与 song18 同作者、同调式，二者曾被第三方拼成无缝 loop（music_jewels.ogg）。BGM 播放列表交替使用。"
+    }
+  }
+}

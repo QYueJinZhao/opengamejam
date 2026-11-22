@@ -9,3 +9,7 @@ dist/
 
 # WorkBuddy local data
 .workbuddy/
+
+# editor temp / screenshot caches
+.trae-html-share-packages/
+_shots/

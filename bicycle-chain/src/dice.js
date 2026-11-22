@@ -98,20 +98,16 @@ export function patternValue(p) {
   return v;
 }
 
-/** 牌型的中文名与展示色。渲染层与浮字共用，避免两处各写一份。 */
+/** Translation key and color for the board feedback. */
 export function patternLabel(p) {
-  if (!p) return { name: '', color: '#E8F0FA' };
   if (p.kind === 'same') {
-    // 6 点的豹子一律吃 JACKPOT ×1.5，但名字要跟着长度走：
-    // 四颗 6 点还叫"六六六"会让玩家以为自己数错了盘面。
-    if (p.jackpot && p.len > 3) return { name: `JACKPOT ×${p.len}`, color: '#FFD65A' };
-    if (p.jackpot) return { name: 'JACKPOT 六六六', color: '#FFD65A' };
-    if (p.len >= 4) return { name: `豹子 ×${p.len}`, color: '#FFD65A' };
-    return { name: '豹子', color: '#FFB44A' };
+    if (p.jackpot) return { key: p.len > 3 ? 'longJackpot' : 'jackpot', color: '#FFD65A' };
+    if (p.len >= 4) return { key: 'longSet', color: '#FFD65A' };
+    return { key: 'set', color: '#FFB44A' };
   }
-  if (p.len >= 6) return { name: '六连顺', color: '#FF5C8A' };
-  if (p.len >= 4) return { name: `大顺子 ×${p.len}`, color: '#9BE9FF' };
-  return { name: '顺子', color: '#7FD8FF' };
+  if (p.len >= 6) return { key: 'sixStraight', color: '#FF5C8A' };
+  if (p.len >= 4) return { key: 'longStraight', color: '#9BE9FF' };
+  return { key: 'straight', color: '#7FD8FF' };
 }
 
 /**

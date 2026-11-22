@@ -3,15 +3,20 @@ import {
   aimFreqStep, aimPanStep, AIM_FREQS,
 } from './src/sim.js';
 import { N, D, mod } from './src/geom.js';
+import { MODE_IDS, getMode, modeIndex, scoreBand, tierProgress } from './src/modes.js';
 import { botInput } from './src/bot.js';
 import { patternValue, pipOf, isFlipDie } from './src/dice.js';
-import {
-  CARD_BASE, SHIFT_BASE, JOKER, ACE_BOMB, FACE_DOWN,
-  cardCi, handOfWindow, findHand, suitOf, rankOf, shiftVariant,
-} from './src/poker.js';
-
 let bad = 0;
 const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else console.log('  ✓ ' + m); };
+
+// 落球后三消要等珠子滑到位才判定，所以直接 dropAt 的测试要多跑几帧。
+// 固定步长 1/120，最多 3 秒（落空滑行封顶 1.5s + 连锁演出），足够贴到链。
+function settle(g) {
+  for (let i = 0; i < 360 && !g.dead; i++) {
+    if (!g.slots.some((b) => b && b.pending)) break;
+    g.step(1 / 120);
+  }
+}
 
 // 1) 万能球：两侧同色时必然定型成那个颜色
 {
@@ -206,7 +211,7 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
 // 这条断言守的就是那一步：插入瞬间 slot+dx 必须等于 dropSlot。
 {
   const g = new Game(53, 'standard');
-  let n = 0, worst = 0, far = 0;
+  let n = 0, worst = 0;
   for (let f = 0; f < 120 * 60; f++) {
     g.setInput(botInput(g));
     g.step(1 / 120);
@@ -216,14 +221,16 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
       const want = mod(e.dropSlot + g.phase, N) * D;
       const d = Math.abs(e.s - want);
       worst = Math.max(worst, Math.min(d, N * D - d));
-      const dd = Math.abs(mod(e.slot - e.dropSlot + N / 2, N) - N / 2);
-      if (dd > 3) far++;
       n++;
     }
     if (g.dead) break;
   }
-  ok(worst < 1e-9, `落球帧的视觉位置就在落点（${n} 次落球，最大偏差 ${worst.toExponential(1)}）`);
-  ok(far > 0, `确实有远距离吸附的样本（${far} 次，否则这条断言没验到东西）`);
+  ok(n > 0 && worst < 1e-9, `落球帧的视觉位置就在落点（${n} 次落球，最大偏差 ${worst.toExponential(1)}）`);
+
+  g.slots.fill(null);
+  g.slots[6] = g.makeBead(0);
+  g.slots[N - 9] = g.makeBead(1);
+  ok(g.snap(0) === 5, '空弧上的球朝最近的珠子滑行，并停在相邻空槽');
 }
 
 // 7) 全流程不变式：跑一局，检查不变量
@@ -249,15 +256,14 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   const g = new Game(31, 'standard');
   g.time = 60;
   const idxs = [];
-  for (let i = 0; i < 6; i++) { g.fire(); idxs.push(g.balls[0].idx); }
+  for (let i = 0; i < 6; i++) {
+    g.balls.length = 0;      // 多球并行之后，先清空再验证"单次只出一颗"
+    g.fire();
+    idxs.push(g.balls[0].idx);
+  }
   ok(idxs.every((i) => i === 0), `始终从 0 号口出球（得到 ${idxs.join('')}）`);
   ok(g.balls.length === 1, `一次只出一颗球（${g.balls.length}）`);
   ok(g.queues.length === 1, `只有一个待发队列（${g.queues.length}）`);
-
-  const h = new Game(33, 'grand');
-  h.time = 80;
-  ok(h.queues.length === 1 && h.nozzleCount() === 1,
-    '大轮长跑同样只有一个队列、一个口');
 
   // 喷头演出状态：出膛置 1，0.30 秒内衰减到 0。
   const p = new Game(34, 'standard');
@@ -267,21 +273,56 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   ok(p.firePulse === 0, `0.33 秒后 firePulse 归零（${p.firePulse}）`);
 }
 
-// 11) 飞行期间不发射下一颗：空中最多一颗球
-//
-// fire() 是整组替换 balls 的，如果 beat 短于飞行时长，上一颗会凭空消失
-// （连落地都没发生过）。step 里的 beat 下限（flight + fireGap）就是为这条守的。
+// 11) 每够一段主动转距就出球，超出的转距留给下一发。
 {
-  const g = new Game(32, 'standard');
-  let maxBalls = 0, fires = 0;
+  const idle = new Game(32, 'standard');
+  let idleFires = 0;
   for (let f = 0; f < 120 * 60; f++) {
+    idle.setInput(0);
+    idle.step(1 / 120);
+    for (const e of idle.drainEvents()) if (e.type === 'fire') idleFires++;
+    if (idle.dead) break;
+  }
+  ok(idleFires === 0, `不转盘 60 秒不出球（${idleFires} 颗）`);
+
+  const g = new Game(32, 'standard');
+  let fires = 0;
+  for (let f = 0; f < 120 * 60; f++) {
+    g.setInput(1);
     g.step(1 / 120);
-    maxBalls = Math.max(maxBalls, g.balls.length);
     for (const e of g.drainEvents()) if (e.type === 'fire') fires++;
     if (g.dead) break;
   }
-  ok(maxBalls <= 1, `空中同时最多一颗球（${maxBalls}）`);
-  ok(fires >= 12, `60 秒内出球 ${fires} 次（间隔约 ${(60 / Math.max(1, fires)).toFixed(2)}s）`);
+  ok(fires >= 12, `按住转盘 60 秒出球 ${fires} 次（间隔约 ${(60 / Math.max(1, fires)).toFixed(2)}s）`);
+  ok(fires === Math.floor(g.spinDist / CFG.spinFireDist), '出球次数等于主动转距除以单发转距的整数部分');
+
+  const threshold = new Game(32, 'standard');
+  threshold.spinAccum = CFG.spinFireDist - 0.01;
+  threshold.v = -4;
+  threshold.step(1 / 120);
+  ok(threshold.shots === 0 && threshold.spinAccum < CFG.spinFireDist, '松手漂移不累计出球转距');
+  // 两颗都还在飞，第三颗仍在跨过阈值的固定步立即出膛。
+  threshold.fire();
+  threshold.fire();
+  threshold.setInput(-1);
+  threshold.step(1 / 120);
+  ok(threshold.shots === 3 && threshold.balls.length === 3, '主动转距达标时立即投球，包括空中已有两颗时');
+  ok(threshold.spinAccum > 0 && threshold.spinAccum < 0.05, '跨过阈值的余量留给下一发');
+}
+
+// 11b) 可见分数、段位与进度只由累计主动转距决定。
+{
+  const g = new Game(32, 'standard');
+  g.slots.fill(null);
+  for (let i = 4; i < 7; i++) g.slots[i] = g.makeBead(0);
+  g.resolve(-1, 0, false);
+  ok(g.clearPoints > 0 && g.score === 0, '消除增加节奏积分，成绩仍等于主动转距');
+  const target = g.mode.tiers[1];
+  g.spinDist = target - 0.01;
+  ok(g.score === target - 0.1 && scoreBand(g.score, g.mode) === 0,
+    '转距成绩取一位小数，未达到距离线时不提前升段');
+  g.spinDist = target;
+  ok(g.score === target && tierProgress(g.score, g.mode).tier.name === 'B', '累计主动转距达标升段');
 }
 
 // 12) 节奏：分数驱动的加速必须是**单调**的
@@ -304,12 +345,19 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
     if (g.beat > prevBeat + 1e-9) rose++;
     prevBeat = g.beat;
     minBeat = Math.min(minBeat, g.beat);
-    if (f % 1200 === 0) checkpoints.push([Math.round(g.time), g.score, +g.tempo.toFixed(3), +g.beat.toFixed(3)]);
+    if (f % 1200 === 0) checkpoints.push([Math.round(g.time), g.clearPoints, +g.tempo.toFixed(3), +g.beat.toFixed(3)]);
     if (g.dead) break;
   }
   ok(rose === 0, `beat 在整局里从不上升（异常 ${rose} 次）`);
   ok(minBeat >= CFG.beatRush - 1e-9, `beat 不会低于 beatRush（最低 ${minBeat.toFixed(3)} ≥ ${CFG.beatRush}）`);
-  ok(g.tempo >= 0.999, `一局之内节奏能走到满速（tempo ${g.tempo.toFixed(2)}，需要 ${CFG.tempoRef} 分）`);
+  // 满速不再由"机器人打多远"来证明：这一版速度是玩家的风险选择，
+  // oracle 会主动压在中速（出球多不如每发都准），分数到不了 tempoRef。
+  // 曲线本身仍然必须能到顶——直接给分数，验证映射。
+  const top = new Game(45, 'standard');
+  top.clearPoints = CFG.tempoRef;
+  top.step(1 / 120);
+  ok(top.tempo >= 0.999, `满 tempoRef 时 tempo 触顶（tempo ${top.tempo.toFixed(2)}）`);
+  ok(g.tempo > 0.5, `整局跑下来节奏确实在爬坡（tempo ${g.tempo.toFixed(2)}）`);
   console.log('  · 节奏曲线（秒 / 分 / tempo / beat）：' + checkpoints.map((c) => c.join(':')).join('  '));
 }
 
@@ -320,7 +368,7 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
 {
   const g = new Game(44, 'standard');
   g.time = CFG.rampSec;
-  g.score = 0;
+  g.clearPoints = 0;
   g.step(1 / 120);
   ok(Math.abs(g.beat - CFG.beatEnd) < 1e-6,
     `零分时 beat 由时间地板决定（${g.beat.toFixed(3)} = beatEnd ${CFG.beatEnd}）`);
@@ -331,7 +379,7 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   const mk = (score) => {
     const g = new Game(42, 'standard');
     g.time = 20;            // 固定时间，排除时间地板的干扰
-    g.score = score;
+    g.clearPoints = score;
     g.step(1 / 120);
     return g;
   };
@@ -342,24 +390,23 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   ok(Math.abs(top.tempoMult - (1 + CFG.tempoGain)) < 1e-9, `满速倍率 = 1 + tempoGain（${top.tempoMult.toFixed(2)}）`);
 }
 
-// 14) 飞行永远装得进一拍里：空中有且只有一颗球
-//
-// 上一版靠 step 末尾的 max(beat, flight + fireGap) 夹逼，那是"事后补丁"；
-// 现在改成 flightDur = min(基准, beat × ratio)，这条不变量由几何保证。
-// 断言守的是那 14% 的空档：它一旦变成负数，球就会在落地前被下一颗覆盖掉。
+// 14) 持续转向时多颗球可以并行，每颗独立落地。
 {
   const g = new Game(43, 'standard');
-  let worst = Infinity, both = 0;
+  let both = 0, fired = 0, landed = 0;
   for (let f = 0; f < 120 * 90; f++) {
-    g.setInput(0);
+    g.setInput(1);
     g.step(1 / 120);
-    g.drainEvents();
-    worst = Math.min(worst, g.beat - g.flightDur);
+    for (const e of g.drainEvents()) {
+      if (e.type === 'fire') fired++;
+      if (e.type === 'lone' || e.type === 'insert' || e.type === 'bomb') landed++;
+    }
     both = Math.max(both, g.balls.length);
     if (g.dead) break;
   }
-  ok(worst >= CFG.fireGap - 1e-9, `每拍都留出 ≥ fireGap 的空档（最小 ${worst.toFixed(3)}s）`);
-  ok(both <= 1, `空中同时最多一颗球（${both}）`);
+  ok(both >= 2, `加速时可有多颗球同时飞行（本轮最多 ${both} 颗）`);
+  ok(fired >= 12, `持续转向出球 ${fired} 次`);
+  ok(landed > 0, `出膛的球真的落地并插入链条（${landed} 次落点事件）`);
 }
 
 // ===============================================================
@@ -407,6 +454,7 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
 
     g.drainEvents();
     g.dropAt(off0, 3, off0);                       // 4 点落在 0 号射口正下方
+    settle(g);
     const cl = g.drainEvents().filter((e) => e.type === 'clear');
     ok(g.chain === 2, `「先消豹子、合拢出顺子」在一枪里自动发生（chain ${g.chain}）`);
     ok(cl[0] && cl[0].kind === 'same' && cl[0].base === 480, `第一段是豹子 4-4-4（base ${cl[0] && cl[0].base}）`);
@@ -584,184 +632,28 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   }
 }
 
-// ===============================================================
-// 扑克规则族（第八轮）
-//
-// 守的是设计稿里能逐条核对的硬约定：
-//   同花 300 / 四条 1500 / 顺子 700（5 连 2500）/ 同花顺 2000；
-//   同花顺点火 7 秒狂热 + 5 秒续时；筹码槽整段 ×2 且三条 / 同花顺送小丑；
-//   底牌槽扣下 / 换出；爆破王牌按 A 参与牌型并炸左右各一张；
-//   染花牌把左右邻改成同花并接上连锁；暗牌不参与牌型。
-//
-// 和骰子那一组一样，断言尽量走**真实结算**，而不是直接读数组：
-// 计分表、狂热、筹码、染花、底牌都是行为，不是数据结构。
-// ===============================================================
+
+// 加速模式与标准轮共用落点和三消，转得更快，单颗飞行时间更短。
 {
-  const C = (rank, suit) => cardCi(rank, suit);
-  const mkPoker = (cards, seed = 200) => {
-    const g = new Game(seed, 'poker');
-    g.slots.fill(null);
-    cards.forEach((ci, i) => {
-      if (ci !== null) g.slots[mod(8 + i, N)] = g.makeBead(ci);
-    });
-    return g;
+  const measure = id => {
+    const g = new Game(31, id);
+    const fireDistance = CFG.spinFireDist;
+    g.setInput(1);
+    for (let frame = 0; frame < 480; frame++) g.step(1 / 120);
+    return { shots: g.shots, distance: g.spinDist, flight: g.flightDur, fireDistance };
   };
-  const clearOf = (g) => g.drainEvents().find((e) => e.type === 'clear');
-
-  // 25) 开局 + 第一枪
-  {
-    const g = new Game(200, 'poker');
-    const off0 = g.nozzleOff[0];
-    ok(g.findMatch() === null, '扑克开局盘面没有现成牌型');
-    ok(g.queues[0][0] === C(2, 0), '第一发锁定 ♥Q');
-    g.drainEvents();
-    g.dropAt(off0, C(2, 0), off0);
-    const cl = clearOf(g);
-    ok(cl && cl.kind === 'flush' && cl.base === 300,
-      `第一枪打出同花 300（${cl && cl.kind} ${cl && cl.base}）`);
-  }
-
-  // 26) 计分表：设计稿给的每一个数字
-  {
-    const h = (cards) => handOfWindow(cards);
-    ok(h([C(0, 0), C(2, 0), C(3, 0)]).value === 300, '同花 3 张 = 300');
-    ok(h([C(0, 0), C(2, 0), C(3, 0), C(4, 0)]).value === 500, '同花 4 张 = 500');
-    ok(h([C(2, 0), C(2, 1), C(2, 2)]).value === 600, '三条 = 600');
-    ok(h([C(2, 0), C(2, 1), C(2, 2), C(2, 3)]).value === 1500, '四条 = 1500');
-    ok(h([C(0, 0), C(1, 1), C(2, 2)]).value === 700, '顺子 3 张 = 700');
-    ok(h([C(0, 0), C(1, 1), C(2, 2), C(3, 3), C(4, 0)]).value === 2500, '5 连大顺 = 2500');
-    ok(h([C(0, 0), C(1, 0), C(2, 0)]).kind === 'straightflush'
-      && h([C(0, 0), C(1, 0), C(2, 0)]).value === 2000, '同花顺 = 2000');
-    ok(h([C(2, 0), C(1, 1), C(0, 2)]).value === 700, '递减顺子 Q-J-10 同样成立');
-  }
-
-  // 27) 顺子必须按链上顺序，不是"点数集合连续"
-  {
-    const h = handOfWindow([C(0, 0), C(4, 1), C(3, 2), C(2, 3), C(1, 0)]);
-    ok(h === null, '10-A-K-Q-J 不是顺子（顺序不对）');
-  }
-
-  // 28) 小丑：任意花色 + 任意点数
-  {
-    ok(handOfWindow([C(2, 0), JOKER, C(2, 1)]).kind === 'three', '小丑补三条');
-    ok(handOfWindow([C(0, 0), JOKER, C(2, 0)]).kind === 'straightflush', '小丑补同花顺');
-    ok(handOfWindow([C(0, 0), C(1, 0), JOKER, C(3, 0)]).kind === 'straightflush',
-      '小丑补同花顺的中间空位');
-  }
-
-  // 29) 爆破王牌：按 A 参与牌型，再把左右各一张炸掉（每张 +150）
-  {
-    ok(handOfWindow([ACE_BOMB, C(4, 1), C(4, 2)]).kind === 'three',
-      '爆破王牌按 A 参与三条');
-    const g = mkPoker([C(0, 0), ACE_BOMB, C(4, 1), C(4, 2), C(2, 3)], 201);
-    g.drainEvents();
-    g.resolve(-1, 0);
-    const cl = clearOf(g);
-    ok(cl && cl.kind === 'three' && cl.bombN === 2,
-      `爆破王牌炸掉左右各一张（bombN ${cl && cl.bombN}）`);
-    ok(cl.len === 5, `整段清掉 5 张（${cl && cl.len}）`);
-    ok(cl.base === 600 + 2 * 150, `基础分 = 600 + 2×150（${cl && cl.base}）`);
-  }
-
-  // 30) 染花牌：左右邻改成同花，并接上下一段连锁
-  {
-    const g = new Game(202, 'poker');
-    g.slots.fill(null);
-    const b = 8;
-    g.slots[mod(b, N)] = g.makeBead(C(0, 0));          // 外侧 ♥10
-    g.slots[mod(b + 1, N)] = g.makeBead(C(1, 0));      // 左邻 ♥J
-    g.slots[mod(b + 2, N)] = g.makeBead(C(0, 1));      // ♠? 三张 10 的牌型
-    g.slots[mod(b + 3, N)] = g.makeBead(C(0, 2));
-    g.slots[mod(b + 4, N)] = g.makeBead(shiftVariant(C(0, 3)));  // 染花 ♣10
-    g.slots[mod(b + 5, N)] = g.makeBead(C(2, 1));      // 右邻 ♦Q
-    g.slots[mod(b + 6, N)] = g.makeBead(C(3, 0));      // 外侧 ♥K
-    const L = g.slots[mod(b + 1, N)];
-    const R = g.slots[mod(b + 5, N)];
-    g.drainEvents();
-    g.resolve(-1, 0);
-    const ev = g.drainEvents().find((e) => e.type === 'shiftsuit');
-    ok(ev && ev.suit === 0, `染花牌把邻居染成 ♥（suit ${ev && ev.suit}）`);
-    ok(suitOf(L.ci) === 0 && suitOf(R.ci) === 0, '左右邻真的变成了同一花色');
-    ok(g.chain >= 2, `染出来的同花接上了连锁（chain ${g.chain}）`);
-  }
-
-  // 31) 底牌槽：扣下下一发；再按一次换回
-  {
-    const g = new Game(203, 'poker');
-    const q = g.queues[0];
-    const before = q[0];
-    g.drainEvents();
-    ok(g.holdNext(), '底牌槽可用');
-    const ev = g.drainEvents().find((e) => e.type === 'hold');
-    ok(g.hold === before && ev && ev.card === before, '第一次按扣下下一发');
-    const next = q[0];
-    g.holdNext();
-    ok(q[0] === before && g.hold === next, '第二次按把底牌换回待发位');
-    ok(g.holdUses === 2, `底牌使用次数 +2（${g.holdUses}）`);
-  }
-
-  // 32) 筹码槽：整段 ×2；三条 / 同花顺额外送小丑牌
-  {
-    const build = (time) => {
-      const g = new Game(204, 'poker');
-      g.slots.fill(null);
-      g.time = time;
-      g.tempoMult = 1;
-      const pad = g.pads.find((p) => p.kind === 'chip');
-      for (let i = 0; i < 3; i++) {
-        g.slots[mod(pad.slot + i, N)] = g.makeBead(C(2, i));
-      }
-      g.drainEvents();
-      g.resolve(-1, 0);
-      return { g, e: clearOf(g) };
-    };
-    const plain = build(0);
-    const chip = build(60);          // 第一个筹码槽 55s 开放
-    ok(plain.e.chip === 1 && chip.e.chip === 2, '筹码槽把整段标记为 ×2');
-    ok(chip.e.gain === plain.e.gain * 2, `筹码槽让得分翻倍（${plain.e.gain} → ${chip.e.gain}）`);
-    ok(chip.g.chipClears === 1 && chip.g.chipJokers === 1, '槽内三条额外送一张小丑牌');
-    ok(chip.g.queues[0][0] === WILD, '小丑牌被塞进下一发的待发位');
-  }
-
-  // 33) 同花顺 → 7 秒狂热 + 5 秒续时；触发的那一下本身不吃 ×2
-  {
-    const g = mkPoker([C(0, 0), C(1, 0), C(2, 0)], 205);
-    g.drainEvents();
-    g.resolve(-1, 0);
-    const evs = g.drainEvents();
-    const cl = evs.find((e) => e.type === 'clear');
-    const fr = evs.find((e) => e.type === 'frenzy');
-    ok(cl && cl.kind === 'straightflush' && cl.frenzyMult === 1,
-      '同花顺触发的那一下不吃狂热倍率');
-    ok(fr && fr.add === 5, `狂热额外续时 5s（${fr && fr.add}）`);
-    ok(g.frenzyT === 7 && g.frenzies === 1, `狂热剩余 7s（${g.frenzyT}）`);
-    ok(Math.abs(g.timeBonus - 5) < 1e-9, `时限延长 5s（${g.timeBonus}）`);
-
-    // 狂热期内的下一次消除必须 ×2
-    g.slots.fill(null);
-    [C(0, 0), C(2, 0), C(3, 0)].forEach((ci, i) => {
-      g.slots[mod(10 + i, N)] = g.makeBead(ci);
-    });
-    g.drainEvents();
-    g.resolve(-1, 0);
-    const cl2 = clearOf(g);
-    ok(cl2 && cl2.frenzyMult === 2, `狂热期内消除 ×2（${cl2 && cl2.frenzyMult}）`);
-  }
-
-  // 34) 暗牌：不参与牌型；连续 3 发落空塞一张
-  {
-    ok(handOfWindow([FACE_DOWN, FACE_DOWN, FACE_DOWN]) === null, '三张暗牌不成牌型');
-    ok(!isColor(FACE_DOWN), '暗牌不参与匹配');
-    const g = mkPoker([C(0, 0), C(2, 1), C(4, 2)], 206);
-    for (let i = 0; i < CFG.blankAt; i++) g.resolve(-1, 0, true);
-    ok(g.blanks === 1, `连续 ${CFG.blankAt} 发落空塞一张暗牌（${g.blanks}）`);
-    ok(g.slots[mod(11, N)] && g.slots[mod(11, N)].ci === RUST, '暗牌接在链条尾巴上');
-  }
+  const standard = measure('standard');
+  const speed = measure('speed');
+  ok(speed.shots > standard.shots && speed.distance > standard.distance, '同样按住 4 秒，加速模式出球更多、转距更长');
+  ok(speed.flight < standard.flight && speed.fireDistance === standard.fireDistance, '加速模式落球更快，发球所需转距一致');
 }
-
 // 35) 单环 + 单喷头：所有模式都回到同一条椭圆环，只有 0 号顶部喷头
 {
-  for (const id of ['standard', 'mini', 'grand', 'dice', 'poker']) {
+  ok(MODE_IDS.join(',') === 'standard,dice,speed', '模式入口为标准轮、骰子轮盘与加速模式');
+  for (const id of ['mini', 'grand', 'poker']) {
+    ok(modeIndex(id) === 0 && getMode(id).id === 'standard', `${id} 的旧入口回到标准轮`);
+  }
+  for (const id of MODE_IDS) {
     const g = new Game(9200, id);
     ok(g.mode.layout === 1, `${id}：layout = 1`);
     ok(g.nozzleOff.length === 1 && g.nozzleOff[0] === 0, `${id}：只有 0 号顶部喷头`);
@@ -771,37 +663,36 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   }
 }
 
-// 36) 两种出球模式：定时 / 音乐节拍
+// 36) 按住转向逐步提速，松手恢复巡航，反向经过零速。
 {
-  ok(Math.abs(musicBpmAt(0) - 88) < 1e-9 && Math.abs(musicBpmAt(1) - 148) < 1e-9,
-    '音乐 BPM 曲线从 88 走到 148');
+  const step = (g, frames) => {
+    for (let f = 0; f < frames; f++) g.step(1 / 120);
+  };
+  const drive = new Game(9300, 'standard');
+  const cruiseSpeed = CFG.drift;
+  step(drive, 60);
+  ok(drive.phase > 0 && drive.v === cruiseSpeed && drive.score === 0, '开局时自动巡航，默认移动不计分');
+  drive.setInput(1);
+  step(drive, 1);
+  ok(drive.v > cruiseSpeed && drive.v < CFG.vMax, '按住转向时从巡航速度逐步加速');
+  step(drive, 479);
+  ok(drive.v > CFG.vMax - 0.02 && drive.shots >= 5, '持续转向接近最高转速并出球');
+  const distanceBefore = drive.spinDist;
+  drive.setInput(0);
+  step(drive, 1);
+  ok(drive.v > cruiseSpeed && drive.v < CFG.vMax, '松手后保留惯性并降速');
+  step(drive, 300);
+  ok(Math.abs(drive.v - cruiseSpeed) < 0.02 && drive.spinDist === distanceBefore, '松手后恢复巡航，成绩维持原值');
 
-  const t = new Game(9300, 'standard', 'timer');
-  t.step(1 / 120);
-  ok(t.fireMode === 'timer' && t.musicBpm === 0, '定时模式不产生音乐 BPM');
-
-  const m = new Game(9301, 'standard', 'music');
-  m.step(1 / 120);
-  ok(m.fireMode === 'music' && m.musicBpm >= 88 && m.musicBpm <= 89,
-    `音乐模式起手 BPM ≈ 88（${m.musicBpm.toFixed(1)}）`);
-  ok(Math.abs(m.beat - 2 * 60 / m.musicBpm) < 1e-9,
-    `音乐模式颗间隔 = 半小节（${m.beat.toFixed(2)}s）`);
-
-  // 用机器人跑 30 秒，量出球间隔确实随 BPM 变快变慢。
-  const r = new Game(9302, 'standard', 'music');
-  const fires = [];
-  for (let f = 0; f < 120 * 30; f++) {
-    r.setInput(botInput(r));
-    r.step(1 / 120);
-    for (const e of r.drainEvents()) if (e.type === 'fire') fires.push(r.time);
-    if (r.dead) break;
-  }
-  const gaps = fires.slice(1).map((x, i) => x - fires[i]);
-  ok(gaps.length >= 5, `音乐模式 30 秒内出球 ${gaps.length + 1} 次`);
-  ok(gaps.length > 1 && Math.max(...gaps) - Math.min(...gaps) > 0.08,
-    `出球间隔有快慢（${Math.min(...gaps).toFixed(2)} ~ ${Math.max(...gaps).toFixed(2)}s）`);
-  ok(m.musicBeatPhase >= 0 && m.musicBeatPhase < 1, '拍相位在 [0,1)');
-  ok(t.musicBeatPhase === 0, '定时模式拍相位为 0');
+  drive.setInput(-1);
+  step(drive, 1);
+  ok(drive.v > 0, '换向时原有速度连续');
+  step(drive, 72);
+  ok(drive.v < -cruiseSpeed, '持续按住左向时越过零速并向左加速');
+  drive.setInput(0);
+  step(drive, 300);
+  ok(Math.abs(drive.v + cruiseSpeed) < 0.02, '松手后沿最后的转向左行巡航');
+  ok(drive.musicBeatPhase >= 0 && drive.musicBeatPhase < 1, '配乐拍相位在 [0,1)');
 }
 
 // 37) 四层音画映射：角度档位 → 五声音阶音高 + 声像
@@ -813,14 +704,19 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
     && Math.abs(aimPanStep(6) - 0.65) < 1e-9, '声像 -0.65 / 0 / +0.65');
 
   const g = new Game(9400, 'standard');
+  // 持续右转后的最高速。
   g.setInput(1);
   g.v = CFG.vMax;
-  g.step(1 / 120);
+  for (let i = 0; i < 2; i++) g.step(1 / 120);
   ok(g.aimStep === 6, `右满舵 → 第 6 档（${g.aimStep}）`);
   g.fire();
   const fe = g.drainEvents().find((e) => e.type === 'fire');
   ok(fe && fe.root === 659.25 && Math.abs(fe.pan - 0.65) < 1e-9,
     '开火事件带右端音高和右声像');
+  const launchAngle = g.aimAngle;
+  g.aimAngle = -12;
+  ok(g.balls[0].launchAngle === launchAngle && g.balls[0].launchAngle !== g.aimAngle,
+    '飞行球锁定出膛角度，后续转向不改变轨迹');
 
   g.slots.fill(null);
   [0, 0, 0].forEach((ci, i) => { g.slots[4 + i] = g.makeBead(ci); });
@@ -829,6 +725,41 @@ const ok = (c, m) => { if (!c) { bad++; console.log('  ✗ ' + m); } else consol
   const ce = g.drainEvents().find((e) => e.type === 'clear');
   ok(ce && ce.root === 659.25 && Math.abs(ce.pan - 0.65) < 1e-9,
     '消除事件沿用上一发的根音与声像');
+}
+
+// 38) BGM 锁拍：选了固定 BPM 的轻音乐，节拍网格锁到它的 BPM
+{
+  const b = new Game(9500, 'standard');
+  b.bgmLockBpm = 98.5;
+  b.step(1 / 120);
+  ok(Math.abs(b.musicBpm - 98.5) < 1e-9,
+    `锁拍后 BPM = 98.5（${b.musicBpm.toFixed(1)}）`);
+  for (let i = 0; i < 120 * 40; i++) b.step(1 / 120);
+  ok(Math.abs(b.musicBpm - 98.5) < 1e-9, '40 秒后仍锁在 98.5，不走 96~142 曲线');
+
+  const f = new Game(9501, 'standard');
+  f.step(1 / 120);
+  ok(f.musicBpm >= 96 && f.musicBpm <= 97,
+    `未锁拍时起手 BPM ≈ 96（${f.musicBpm.toFixed(1)}）`);
+  f.clearPoints = CFG.tempoRef;
+  f.step(1 / 120);
+  ok(f.musicBpm > 120, `未锁拍时 BPM 随分数抬升（${f.musicBpm.toFixed(1)}）`);
+}
+
+// 39) 新球采用出膛时的速度，转向操作不改变已出膛球的轨迹。
+{
+  const g = new Game(9600, 'standard');
+  g.fire();
+  const first = g.balls[0];
+  const before = g.flightLeft();
+  g.setInput(1);
+  for (let f = 0; f < 12; f++) g.step(1 / 120);
+  ok(Math.abs(before - g.flightLeft() - 0.1) < 1e-6, '转向加速时已在飞行的球照常推进');
+  for (let f = 0; f < 120 && g.shots < 2; f++) g.step(1 / 120);
+  const second = g.balls[1];
+  ok(second && second.dur < first.dur, '更高转速出膛的球飞行时间更短');
+  ok(g.shots === 2 && Math.abs(g.spinDist - g.spinAccum - CFG.spinFireDist) < 1e-6,
+    '持续转向仍以主动转距阈值出球，余量结转');
 }
 
 console.log(bad ? `\n失败 ${bad} 项` : '\n全部通过');

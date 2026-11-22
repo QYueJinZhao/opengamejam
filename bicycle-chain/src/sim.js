@@ -13,9 +13,6 @@
 // 6. 骰子模式（第六轮）：把"同色三连"换成"点数牌型"（豹子 / 顺子），
 //    并引入两个落在**骰子自己身上**的主动机制（+1 翻面、×2 镀金）。
 //    规则本体全部在 dice.js，这里只负责把它们接到既有的结算管线上。
-// 7. 扑克模式（第八轮）：把"点数"再拆成"花色 + 点数"两个维度。
-//    规则本体在 poker.js；本文件多出来的只有底牌暂存、筹码槽和狂热时间
-//    这三条**属于整台机器**的机制（它们不是某张牌自己的属性）。
 
 import { C, N, D, L, mod, configure } from './geom.js';
 import { getMode } from './modes.js';
@@ -23,12 +20,6 @@ import {
   PIPS, DICE_SPECIAL, isPip, pipOf, pipIndex, isFlipDie, findPattern,
   patternValue, patternLabel, evalPlacement, bestPipAt,
 } from './dice.js';
-import {
-  CARD_BASE, SHIFT_BASE, SUITS, cardSkin, isFaceCard, isShiftCard,
-  isPokerCard, suitOf, withSuit, findHand, patternLabel as pokerLabel,
-  evalPlacement as evalCardPlacement, bestCardAt,
-} from './poker.js';
-
 // ---- 球种：形状是第一编码，色相是第二编码 ----
 //
 // 上一版是「圆形球 + 内部纹样 + 中心形符」，四种区分全靠同一块圆形画布里的
@@ -65,7 +56,7 @@ export const SPECIAL = {
 let RULES = 'color';
 
 export function setRules(r) {
-  RULES = r === 'dice' ? 'dice' : r === 'poker' ? 'poker' : 'color';
+  RULES = r === 'dice' ? 'dice' : 'color';
 }
 
 export function rulesOf() {
@@ -78,24 +69,24 @@ export function ballSkin(ci) {
     if (isPip(ci)) return PIPS[pipIndex(ci)];
     return DICE_SPECIAL[ci] || SPECIAL[ci] || SPECIAL[RUST];
   }
-  if (RULES === 'poker') return cardSkin(ci);
   return PALETTE[ci] || SPECIAL[ci] || SPECIAL[RUST];
 }
 
-/** 是否能参与匹配（锈球 / 铅骰 / 暗牌不能）。骰子模式下翻面骰（20..25）算点数骰。 */
+/** 是否能参与匹配（锈球 / 铅骰不能）。骰子模式下翻面骰（20..25）算点数骰。 */
 export function isColor(ci) {
   if (RULES === 'dice') return isPip(ci);
-  if (RULES === 'poker') return isPokerCard(ci);
   return ci >= 0 && ci < PALETTE.length;
 }
 
 export const BASE_CFG = {
-  vMax: 13.0,
-  accel: 55.0,
-  dampK: 9.0,
-  drift: 1.35,
-  stopEps: 0.12,
-  brakeMagnet: 4.0,
+  // 持续转向后的轨道转速上限（格/秒）。
+  vMax: 12.5,
+  drift: 1.35,        // 松手时的巡航速度（格/秒）
+  dampK: 3.8,         // 松手后的回落速度（1/s）
+  spinK: 3.2,         // 按住后的加速与换向速度（1/s）
+
+  fireInterval: 1.70,  // 游戏时间内固定出弹间隔（秒）
+
   // 飞行时长：0.203 → 0.34 → 0.80，三轮才调对。
   //
   // 前两轮都按"球飞得快"去理解，方向错了。真正决定观感的是**相对速度**：
@@ -116,17 +107,12 @@ export const BASE_CFG = {
   // 时长由 dist/speed 推出来。现在两者等价（间距恒定），但语义正过来了——
   // 以后改炮管长度、或者改成斜射，速度不用重调，时长自己跟着变。
   //
-  // 第三轮：3.7 → 4.6，同时把速度从 4.6 压到 3.5。
-  // 用户的原话是"炮口和轮盘距离要远一点，需要些时间玩家可以反应"——
-  // 反应时间 = 距离 / 速度，所以两件事要一起做才有意义：只拉远距离、
-  // 不加时间，玩家看到的只是"球飞得更急"；只减速、不拉远，炮口会贴在轮盘边上
-  // 显得局促。现在 4.6 / 3.5 = 1.31s，比上一版的 0.80s 长 64%。
-  //
-  // 4.6 而不是更远，是画布预算决定的：炮口往上一格，整个轮盘就要缩一格
-  // （见 render 的 syncGeo）。再远下去珠子会小到看不清星芒和八面体的区别，
-  // 那就把第一轮做的形状编码废掉了。
-  nozzleGap: 4.6,      // 炮口到轨道中心线的世界距离（render 的法向偏移用同一个值）
-  flightSpeed: 3.5,    // 世界单位 / 秒 → 飞行 1.31s
+  // 第四轮：4.6 → 6.2，速度 3.5 → 4.2（飞行 1.31s → 1.48s）。
+  // 用户再次要求"炮口离盘子远一些"：视觉间距从约 140px 拉到 176px
+  // （render 的竖向预算同步从 261 提到 290），飞行时间略增给玩家更多反应窗口。
+  // 再远下去珠子会小到看不清星芒和八面体的区别，那就把形状编码废掉了。
+  nozzleGap: 6.2,      // 炮口到轨道中心线的世界距离（render 的法向偏移用同一个值）
+  flightSpeed: 4.2,    // 世界单位 / 秒 → 起手飞行 1.48s
   // ---- 节奏（第五轮：从"时间驱动"改成"分数驱动"）----
   //
   // 上一版 beat 只是时间的函数：90 秒内从 2.20 匀速压到 1.45。
@@ -136,7 +122,7 @@ export const BASE_CFG = {
   //   3. 1.45 距离"飞行 1.31 + 间隔 0.08"的地板只剩 0.06 秒，
   //      想再快也没有余量了（这是上一轮拉长飞行留下的债）。
   //
-  // 现在 beat = min(时间地板, 分数曲线)：
+  // 节奏曲线独立于出弹计时，只控制消除倍率和配乐。
   //   时间地板 —— 保障局内一定有推进，跟表现无关，是"下限"；
   //   分数曲线 —— 你打得越多，机器转得越快。这是**奖励**，不是惩罚：
   //               加速意味着单位时间更多发球 = 更多分。
@@ -158,8 +144,7 @@ export const BASE_CFG = {
   // 现在反过来：飞行 = min(基准时长, 颗间隔 × ratio)，机器越快球飞得越快。
   // 0.86 意味着任何速度下都留 14% 的"空档"给玩家看落点，
   // 也让"落地 → 下一发出膛"永远是两个可以分辨的事件。
-  flightRatio: 0.86,
-  fireGap: 0.08,
+  flightRatio: 0.82,  // 给每发落地和下一次出膛留出间隔
   levelTime: 90,
   startBeads: 8,
   colorSteps: [[0, 3], [38, 4]],
@@ -209,6 +194,14 @@ export const BASE_CFG = {
   dxSlideSpeed: 4.6,   // 格 / 秒 —— 落空吸附的滑行速度
   dxSlideMaxSec: 1.5,  // 再远也不超过这个时长
 
+  // 消除之后的合拢是第三档速度：它既不是"让位"（必须快，慢了读成堆住），
+  // 也不是"珠子自己走向链条"。这一段是"跑道被吃掉一截、后面的珠子追上来"，
+  // 玩家要靠它读出"刚才消的是哪一段"。
+  // 取 4.8：消 3 颗 ≈ 0.63s，光带和残影先把话说完，链条再合拢；
+  // 而下一颗球最快 1.0s 后才落，不会和补位撞在一起。
+  // 原来共用 dxSpeed（11 格/秒）时 3 格只要 0.27s，空缺一眼就没了。
+  dxClearSpeed: 4.8,   // 格 / 秒 —— 消除后的合拢速度
+
   // ---- 骰子模式专用（其余模式保持 null / 0，等于关闭）----
   //
   // 集中写在这里而不是散进 sim 的分支里，是为了让"骰子到底特殊在哪"
@@ -220,19 +213,6 @@ export const BASE_CFG = {
   pads: null,          // [{ rel, kind, at, name }] —— rel 相对 0 号射口的槽位偏移
   rollDur: 0.26,       // 骰子翻滚动画时长（落地 / 被翻面时播一次）
 
-  // ---- 扑克模式专用（其余模式保持 0 / false，等于关闭）----
-  //
-  // 和骰子那段同一个原则：所有"这套规则特殊在哪"集中在一屏内看完。
-  // 基础模式与骰子模式的任何一条逻辑都不读这些字段。
-  shiftRate: 0,        // 染花牌概率（第三种特殊牌）
-  holdEnabled: false,  // 底牌暂存槽（E / 右键）
-  frenzyDur: 0,        // 同花顺触发的狂热秒数
-  frenzyMult: 1,       // 狂热期间所有消除的倍率
-  frenzyTime: 0,       // 同花顺额外续时（秒）
-  chipBonusJoker: false, // 筹码槽内打出三条 / 同花顺 → 送一张小丑牌
-  pokerSmart: 0.74,     // 发牌里"按局面挑"的比例（其余均匀抽）
-  pokerWeight: 0.08,    // evalCardPlacement 收益 → 权重的压缩系数
-  comboCap: 0,          // 连消倍率上限（0 = 不封顶）；扑克用它压住"牌型密度"
 };
 
 export const CFG = { ...BASE_CFG };
@@ -366,11 +346,12 @@ function buildNozzleOff() {
 }
 
 export class Game {
-  constructor(seed = 20261120, modeId = 'standard', fireMode = 'timer') {
+  constructor(seed = 20261120, modeId = 'standard') {
     this.mode = getMode(modeId);
     this.modeId = this.mode.id;
-    // 出球模式：'timer' 走原来的时间/分数曲线；'music' 走音乐半小节。
-    this.fireMode = fireMode === 'music' ? 'music' : 'timer';
+    // 外部固定 BPM 的 BGM 接入时，节拍网格锁到这个 BPM；
+    // 0 表示不锁，跟 sim 自己的 96→142 曲线走。
+    this.bgmLockBpm = 0;
     // 先改几何，再建盘面：N / D 是 live binding，后面所有代码读到的都是新值
     configure(this.mode.geo);
     this.nozzleOff = buildNozzleOff();
@@ -391,11 +372,16 @@ export class Game {
     this.rng = mulberry32(this.seed);
     this.slots = new Array(N).fill(null);
     this.phase = 0;
-    this.v = 0;
+    this.v = CFG.drift;
     this.input = 0;
+    this.driveDirection = 1;
     this.time = 0;
-    this.beatClock = 0;
     this.beat = CFG.beatStart;
+    this.fireInterval = CFG.fireInterval;
+    this.nextFireAt = this.fireInterval;
+
+    // ---- 转速 / 转动距离（第十六轮）----
+    this.spinDist = 0;       // 本局累计主动转距，单位为槽格
     // 节奏状态。tempo 是"现在这台机器有多快"的归一化读数（0 = 起手，1 = 满速），
     // tempoMult 是它换算成的每消倍率。两者都在 step 里每帧重算，
     // 渲染和音效直接读，不各自揣一份公式。
@@ -410,7 +396,7 @@ export class Game {
     // 渲染层拿它做炮口闪光、后坐和烟雾，音效层拿它对齐开火音。
     this.firePulse = 0;
     this.fireSeq = 0;        // 第几发：让每次闪光的星芒角度略有不同
-    this.musicBpm = 0;       // 音乐出球模式的当前 BPM（timer 模式为 0）
+    this.musicBpm = 96;      // 节拍 BPM（96 → 142，随 tempo 变；标题页未 step 时也要有效）
     this.musicTempo = 0;     // BPM 归一化后的 0..1，供 HUD / 音效使用
     this.musicBeatPhase = 0; // 当前四分音符内的相位，渲染层做拍点脉冲
     this.aimAngle = 0;       // 炮身视觉角度（度，连续平滑）
@@ -427,17 +413,6 @@ export class Game {
     this.jackpots = 0;       // 6-6-6 次数
     this.longestRun = 0;     // 本局最长的顺子（结算页用）
 
-    // ---- 扑克模式状态（其余模式恒为 0 / null）----
-    this.hold = null;          // 底牌暂存槽里那张牌（ci）
-    this.holdUses = 0;         // 玩家使用底牌槽的次数（结算页用）
-    this.frenzyT = 0;          // 狂热剩余秒数
-    this.frenzies = 0;         // 同花顺触发的狂热次数
-    this.straightFlushes = 0;  // 同花顺次数
-    this.fours = 0;            // 四条 / 五条次数
-    this.longestStraight = 0;  // 本局最长的顺子（含同花顺）
-    this.chipClears = 0;       // 在筹码槽里引爆的次数
-    this.chipJokers = 0;       // 筹码槽送出去的小丑牌数
-
     // 槽位是在构造时按 0 号射口算死的：射口不动，槽位就不动。
     // 渲染层按 (slot + phase) 画，于是它随轮鼓转——玩家能把某一格转到炮口下。
     this.pads = (CFG.pads || []).map((p, i) => ({
@@ -445,7 +420,7 @@ export class Game {
       slot: mod(this.nozzleOff[0] + p.rel, N),
     }));
 
-    this.flightDur = CFG.nozzleGap / CFG.flightSpeed;
+    this.flightDur = Math.min(CFG.nozzleGap / CFG.flightSpeed, this.fireInterval * CFG.flightRatio);
     this.balls = [];
 
     // 每个射口独立的三球队列：queues[i][0] 是待发球，[1][2] 是预览
@@ -453,7 +428,7 @@ export class Game {
       this.pickColor(), this.pickColor(), this.pickColor(),
     ]);
 
-    this.score = 0;
+    this.clearPoints = 0;    // 独立的消除积分，也用于推进节奏倍率与配乐
     this.chain = 0;
     this.chainT = -99;
     this.maxChain = 0;
@@ -483,7 +458,6 @@ export class Game {
   // 开局阵型：每个落点周围铺一段，段内不允许出现现成三连
   placeOpening() {
     if (this.rules === 'dice') return this.placeOpeningDice();
-    if (this.rules === 'poker') return this.placeOpeningPoker();
 
     const offs = this.nozzleOff.slice(0, this.mode.layout);
     const per = Math.max(2, Math.floor(CFG.startBeads / offs.length));
@@ -492,10 +466,13 @@ export class Game {
     for (const off of offs) {
       for (let i = 0; i < per; i++) {
         const idx = mod(off + i - back, N);
-        let ci = 0;
-        for (let tries = 0; tries < 30; tries++) {
-          ci = Math.floor(this.rng() * maxCi);
-          if (!this.wouldTriple(idx, ci)) break;
+        // 入场连珠给第一发一个明确目标，后续仍随机生成。
+        let ci = this.queues[0][0];
+        if (i >= 2) {
+          for (let tries = 0; tries < 30; tries++) {
+            ci = Math.floor(this.rng() * maxCi);
+            if (!this.wouldTriple(idx, ci)) break;
+          }
         }
         this.slots[idx] = this.makeBead(ci);
       }
@@ -549,59 +526,6 @@ export class Game {
     if (this.queues[0]) this.queues[0][0] = 3;
   }
 
-  /**
-   * 扑克模式的开局：手工摆一个"第一枪就同花"的局。
-   *
-   * 摆法是（从 0 号射口左边两格起算）：
-   *
-   *     ... ♠Q  ♥10  [♥K]  ♣A  ♦J  ♠Q ...
-   *                  ↑ 第一发 ♥Q 插在 ♥K 前面
-   *
-   * 注意目标格**必须是满的**：游戏的落点规则是"落到空格会吸附到最近的链条"，
-   * 如果摆一个真空隙，♥Q 会被吸到旁边，根本进不了 ♥10 和 ♥K 中间。
-   * 插进 ♥K 前面（并把它推开一格）之后是 ♥10 ♥Q ♥K，同花 300。
-   *
-   * 刻意避开 10-J-Q / J-Q-K，因为那会是同花顺（2000 + 狂热），
-   * 开局第一枪就给太大的东西，后面的"三条 / 顺子"就教不动了。
-   *
-   * 其余槽位随机补牌，每补一张都要求全环没有现成牌型——
-   * 和另外两个模式一样，"开局不许有现成的消除"是这条曲线能从头教起的前提。
-   */
-  placeOpeningPoker() {
-    const off0 = this.nozzleOff[0];
-    const seed = [
-      [off0 - 2, 2, 2],   // ♠Q
-      [off0 - 1, 0, 0],   // ♥10
-      [off0,     3, 0],   // ♥K（被第一发 ♥Q 推开）
-      [off0 + 1, 4, 3],   // ♣A
-      [off0 + 2, 1, 1],   // ♦J
-      [off0 + 3, 2, 2],   // ♠Q
-    ];
-    for (const [idx, rank, suit] of seed) {
-      this.slots[mod(idx, N)] = this.makeBead(CARD_BASE + rank * 4 + suit);
-    }
-
-    const offs = this.nozzleOff.slice(1, this.mode.layout);
-    for (const off of offs) {
-      for (let i = -2; i <= 4; i++) {
-        const idx = mod(off + i, N);
-        if (this.slots[idx]) continue;
-        let placed = false;
-        for (let tries = 0; tries < 40; tries++) {
-          this.slots[idx] = this.makeBead(CARD_BASE + Math.floor(this.rng() * 20));
-          if (!findHand(this.slots, N)) { placed = true; break; }
-        }
-        // 40 次都凑不出"无牌型"就留空，而不是把最后一颗会成型的牌留在盘上。
-        // 开局有一个现成牌型，等于第一枪之前系统自己先消了一次——教程就废了。
-        if (!placed) this.slots[idx] = null;
-      }
-    }
-
-    // 第一发锁定 ♥Q：玩家第一次开火就能看到"同花"成立。
-    // 之后的牌正常发——教程只教一次。
-    if (this.queues[0]) this.queues[0][0] = CARD_BASE + 2 * 4 + 0;
-  }
-
   wouldTriple(idx, ci) {
     const at = (j) => {
       if (j === idx) return ci;
@@ -627,7 +551,9 @@ export class Game {
     // 把它做成"动画进度"而不是"逻辑状态"，是为了让快进 / 无头测试完全不受它影响。
     // x2：这颗骰子踩过镀金槽，消除时得分 ×2。状态记在珠子上（而不是槽位上），
     // 这正是上一版 ×2 槽失败的原因：旧版把状态放在一段几何区间里，玩家看不见。
-    return { id: beadSeq++, ci, dx: 0, dv: 0, roll: 0, x2: false };
+    // pending：这颗球是刚落下的，三消要等它滑到链条上（dx 归零）才判定。
+    // pendingOff：那一发的 off，结算时写进 clear 事件（音画映射用）。
+    return { id: beadSeq++, ci, dx: 0, dv: 0, roll: 0, x2: false, pending: false, pendingOff: 0 };
   }
 
   occupied() {
@@ -637,23 +563,18 @@ export class Game {
   }
 
   colorCount() {
-    // 扑克模式没有"颜色逐个解锁"：牌池固定 20 张（5 点 × 4 花），
-    // 难度由牌型密度和节奏承担，不靠往牌池里加新花色。
-    if (this.rules === 'poker') return 20;
     let n = 3;
     for (const [t, c] of CFG.colorSteps) if (this.time >= t) n = c;
     return Math.min(n, this.colorTotal());
   }
 
-  /** 本模式的"几种可匹配面"：基础模式 4 色，骰子模式 6 点，扑克 20 张。 */
+  /** 本模式的"几种可匹配面"：基础模式 4 色，骰子模式 6 点。 */
   colorTotal() {
-    if (this.rules === 'poker') return 20;
     return this.rules === 'dice' ? PIPS.length : PALETTE.length;
   }
 
-  /** ci → 匹配面下标；不参与匹配的返回 -1（锈球 / 铅骰 / 暗牌） */
+  /** ci → 匹配面下标；不参与匹配的返回 -1（锈球 / 铅骰） */
   faceIndex(ci) {
-    if (this.rules === 'poker') return isFaceCard(ci) ? (ci - CARD_BASE) % 20 : -1;
     if (this.rules === 'dice') return isPip(ci) ? pipIndex(ci) : -1;
     return ci >= 0 && ci < PALETTE.length ? ci : -1;
   }
@@ -678,45 +599,6 @@ export class Game {
     return [this.volleyIndex % n];
   }
 
-  /**
-   * 扑克模式的装填：按"这张牌现在有没有用"加权发牌。
-   *
-   * 20 张牌如果均匀发，顺子和同花的出现频率会低到玩家必须等运气；
-   * 而扑克模式的核心乐趣是"规划牌型"，不是"等一张牌"。
-   * 这里和骰子模式同一个比例（74% 加权 / 26% 均匀）：
-   * 全按最优发，玩家会发现每张牌都有解，于是只做反应、不再预判。
-   *
-   * 权重用 evalCardPlacement 的收益压缩到 0.08 倍：直接拿 2000 分做权重，
-   * 同花顺会被发成常态；压缩之后，300 分的同花和 700 分的顺子才是
-   * "更常见但仍需争取"的那一档。
-   */
-  pickPokerCard() {
-    const at = (j) => this.slots[mod(j, N)];
-    const weights = [];
-    let total = 0;
-    for (let i = 0; i < 20; i++) {
-      const ci = CARD_BASE + i;
-      let best = 0;
-      for (let k = 0; k < N; k++) {
-        const sc = evalCardPlacement(at, N, k, ci, at(k) !== null);
-        if (sc > best) best = sc;
-      }
-      const w = Math.max(4, best * CFG.pokerWeight);
-      weights.push(w);
-      total += w;
-    }
-
-    if (this.rng() < CFG.pokerSmart) {
-      let r = this.rng() * total;
-      for (let i = 0; i < 20; i++) {
-        r -= weights[i];
-        if (r <= 0) return CARD_BASE + i;
-      }
-      return CARD_BASE + 19;
-    }
-    return CARD_BASE + Math.floor(this.rng() * 20);
-  }
-
   // ---- 发色权重：按场上存量加权，冷门色强制召回 ----
   //
   // 骰子模式下"色"换成"点"，但意图完全一样：场上有几点，就多补几点。
@@ -724,7 +606,6 @@ export class Game {
   // `count[20]` 会是一条 undefined 的加法，抽出来的权重全是 NaN——
   // 那种 bug 不会报错，只会让发球变成纯随机，而且只在骰子模式出现。
   pickColor() {
-    if (this.rules === 'poker') return this.pickPokerCard();
     const maxCi = this.colorCount();
 
     // 骰子模式的装填：**按"这一点现在有没有用"发牌**。
@@ -810,18 +691,6 @@ export class Game {
       if (r < CFG.wildRate) return WILD;
       if (r < CFG.wildRate + CFG.bombRate) return BOMB;
 
-      if (this.rules === 'poker') {
-        const sr = CFG.shiftRate || 0;
-        if (sr > 0 && r < CFG.wildRate + CFG.bombRate + sr) {
-          // 染花牌也是一张**有牌面的牌**：抽"这个落点最需要的那张"，
-          // 再把它升级成染花版本。纯随机抽一张染花牌，5% 只会变成噪声。
-          const ci = bestCardAt((j) => this.slots[mod(j, N)], N,
-            this.impactSlot(this.nozzleOff[0]), false);
-          return SHIFT_BASE + (ci - CARD_BASE);
-        }
-        return this.pickPokerCard();
-      }
-
       const fr = CFG.flipRate || 0;
       if (fr > 0 && r < CFG.wildRate + CFG.bombRate + fr) {
         // 翻面骰的点数按局面挑：它不是随机抽一面，而是抽"你现在最缺的那一面"，
@@ -851,12 +720,6 @@ export class Game {
       const p = this.nearestNull(k, +1);
       const q = this.nearestNull(k, -1);
       pushRight = p >= 0 && (q < 0 || p <= q);
-    }
-
-    // 扑克模式的小丑牌**不在落地时定型**：它要留在链上同时充当任意花色
-    // 与任意点数，这正是它和骰子万能骰的区别。这里只是兜底。
-    if (this.rules === 'poker') {
-      return bestCardAt((j) => this.slots[mod(j, N)], N, k, occupied);
     }
 
     // 骰子模式的万能骰：按真实推挤方向构造虚拟邻接视图再求最优点数。
@@ -911,24 +774,11 @@ export class Game {
 
     this.time += dt;
 
-    // ---- 出球节奏：两种模式共用同一条"拍间隔 → 倍率"管线 ----
-    //
-    // timer：时间地板 vs 分数曲线取更快的那条（原来的曲线）。
-    // music：半小节一颗，BPM 按 MUSIC_BPM_KEYS 在两慢两快之间走。
-    //        88→148 BPM 对应 1.36s→0.81s 的颗间隔，玩家听到的鼓点
-    //        和炮口蓄力是同一个拍子。
-    if (this.fireMode === 'music') {
-      const prog = Math.min(1, this.time / Math.max(1, CFG.levelTime));
-      this.musicBpm = musicBpmAt(prog);
-      this.beat = 2 * 60 / this.musicBpm;          // 半小节 = 2 拍
-      this.musicTempo = Math.max(0, Math.min(1, (this.musicBpm - 88) / 60));
-      this.tempo = this.musicTempo;
-      // 相位用累加而不是 time / 拍长：BPM 变化时不会突然跳一下。
-      this.musicBeatPhase = (this.musicBeatPhase + dt / (60 / this.musicBpm)) % 1;
-    } else {
+    // 时间和消除积分推进节奏倍率及配乐 BPM。
+    {
       const tRamp = Math.min(1, this.time / CFG.rampSec);
       const beatTime = CFG.beatStart + (CFG.beatEnd - CFG.beatStart) * tRamp;
-      const prog = Math.min(1, this.score / Math.max(1, CFG.tempoRef));
+      const prog = Math.min(1, this.clearPoints / Math.max(1, CFG.tempoRef));
       // 0.85 次幂：前段抬得快一点。线性的话，前 20% 的分数只换来 20% 的加速，
       // 而玩家在开局那一段最需要"我做的每件事都有反应"的即时回馈。
       const beatScore = CFG.beatStart + (CFG.beatRush - CFG.beatStart) * Math.pow(prog, 0.85);
@@ -939,23 +789,18 @@ export class Game {
       // 会看到机器越转越快、倍率却一直是 1.00——那是在骗他。
       const span = Math.max(1e-6, CFG.beatStart - CFG.beatRush);
       this.tempo = Math.max(0, Math.min(1, (CFG.beatStart - this.beat) / span));
-      this.musicBpm = 0;
-      this.musicTempo = 0;
-      this.musicBeatPhase = 0;
     }
     this.tempoMult = tempoMultOf(this.tempo, CFG.tempoGain);
     if (this.tempo > this.maxTempo) this.maxTempo = this.tempo;
     if (this.tempo >= 0.995) this.fastT += dt;
     if (this.firePulse > 0) this.firePulse = Math.max(0, this.firePulse - dt / 0.30);
 
-    // 飞行时长跟着颗间隔收紧。地板在这里是"拍内空档"（1 - ratio），
-    // 所以 beat 再也不需要 max(beat, flight + fireGap) 这种事后夹逼：
-    // 只要 flightRatio < 1，飞行永远装得进一拍里，空中最多一颗球的不变量
-    // 由几何保证，而不是靠一个容易忘掉的 clamp。
-    this.flightDur = Math.min(
-      CFG.nozzleGap / CFG.flightSpeed,
-      this.beat * CFG.flightRatio,
-    );
+    // 音乐节拍：BPM 96 → 142（同 setTempo 的映射），四分音符为拍。
+    // 选了轻音乐时，配乐使用固定 BPM。
+    // 相位用累加而不是 time / 拍长：BPM 变化时不会突然跳一下。
+    this.musicBpm = this.bgmLockBpm > 0 ? this.bgmLockBpm : 96 + 46 * this.tempo;
+    this.musicTempo = this.tempo;
+    this.musicBeatPhase = (this.musicBeatPhase + dt * this.musicBpm / 60) % 1;
 
     for (let i = this.tempoMark; i < TEMPO_MARKS.length; i++) {
       if (this.tempo < TEMPO_MARKS[i].at) break;
@@ -966,19 +811,18 @@ export class Game {
       });
     }
 
-    const dir = this.input;
-    if (dir !== 0) {
-      this.v += dir * CFG.accel * dt;
-    } else {
-      this.v = CFG.drift + (this.v - CFG.drift) * Math.exp(-CFG.dampK * dt);
-    }
-    this.v = Math.max(-CFG.vMax, Math.min(CFG.vMax, this.v));
+    const driving = this.input !== 0;
+    const target = this.driveDirection * (driving ? CFG.vMax : CFG.drift);
+    const response = driving ? CFG.spinK : CFG.dampK;
+    this.v += (target - this.v) * -Math.expm1(-response * dt);
     this.phase = mod(this.phase + this.v * dt, N);
 
+    if (driving) this.spinDist += Math.abs(this.v) * dt;
+
     // 炮身瞄准角：把"转盘速度"映射到 -24°~+24° 的 7 个固定档位。
-    // 中心是静止漂移，所以松手时会回到 0°；音频只认 aimStep，
+    // 巡航时角度接近中间；音频只认 aimStep，
     // aimAngle 只负责炮身平滑倾斜——两者共用同一套档位。
-    const aimRel = (this.v - CFG.drift) / Math.max(0.1, CFG.vMax - CFG.drift);
+    const aimRel = this.v / CFG.vMax;
     const aimRaw = Math.max(-24, Math.min(24, aimRel * 24));
     this.aimStep = Math.max(0, Math.min(6, Math.round((aimRaw + 24) / 8)));
     const aimTarget = AIM_ANGLES[this.aimStep];
@@ -989,19 +833,33 @@ export class Game {
     //   1 格（插入时整列让位）—— dxSpeed，必须快，慢了整列珠子会叠在邻居身上；
     //   2 格以上（落空后吸附到链条）—— dxSlideSpeed，必须慢，
     //     那是"珠子从落点走向链条"，用 11 格/秒走完 6 格只要 0.55 秒，等于瞬移。
-    for (const b of this.slots) {
+    // 滑到位的球在这一刻才真正碰到链——三消判定就从这里触发（不再在落地帧）。
+    const justLanded = [];
+    for (let slot = 0; slot < this.slots.length; slot++) {
+      const b = this.slots[slot];
       if (!b) continue;
       // 翻滚动画：纯表现，但必须在这里推进——渲染层没有 dt 的权威来源，
       // 让渲染自己按真实时间衰减，会和固定步长在两倍速/掉帧时错开。
       if (b.roll > 0) b.roll = Math.max(0, b.roll - dt);
-      if (b.dx === 0) continue;
-      const ad = Math.abs(b.dx);
-      const sp = b.dv || CFG.dxSpeed;
-      const s = sp * dt;
-      if (ad <= s) { b.dx = 0; b.dv = 0; }
-      else b.dx = b.dx > 0 ? b.dx - s : b.dx + s;
+      if (b.dx !== 0) {
+        const ad = Math.abs(b.dx);
+        const sp = b.dv || CFG.dxSpeed;
+        const s = sp * dt;
+        if (ad <= s) { b.dx = 0; b.dv = 0; }
+        else b.dx = b.dx > 0 ? b.dx - s : b.dx + s;
+      }
+      if (b.pending && b.dx === 0) {
+        b.pending = false;
+        justLanded.push([slot, b.pendingOff]);
+      }
     }
-    if (this.frenzyT > 0) this.frenzyT = Math.max(0, this.frenzyT - dt);
+    // 先收齐再结算：resolve 会清珠 + compact 挪位，边遍历边改 slots 会漏珠。
+    for (const [slot, off] of justLanded) {
+      // 可能已被同帧早先的连锁清掉；不在盘上就不再判定。
+      if (this.slots[slot] === null) continue;
+      this.resolve(slot, off, true);
+      if (this.dead) return;
+    }
     if (this.chain > 0 && this.time - this.chainT > 1.1) this.chain = 0;
     if (this.combo > 0 && this.time - this.comboT > COMBO_WINDOW) {
       if (this.combo >= 3) this.events.push({ type: 'combobreak', combo: this.combo });
@@ -1012,19 +870,23 @@ export class Game {
     // 落地排在发射之前：同一帧里"上一颗贴上链条 → 下一颗出膛"是连续动作，
     // 反过来的话每次都会多等一帧，1.3s 的间隔里那一帧停顿是听得出来的。
     if (this.balls.length) {
+      // 每颗球保持出膛时确定的飞行时长。
       for (const b of this.balls) b.t += dt;
-      if (this.balls[0].t >= this.balls[0].dur) this.land();
-      if (this.dead) return;
+      // 多球：只落"到时的第一颗"，后面的继续飞。上一版是 `balls[0]` 到时
+      // 就把整组清空（一次只有一颗球，所以没暴露），多球之后那会让第二颗凭空消失。
+      while (this.balls.length && this.balls[0].t >= this.balls[0].dur) {
+        this.land();
+        if (this.dead) return;
+      }
     }
 
-    this.beatClock += dt;
-    if (this.beatClock >= this.beat && !this.balls.length) {
-      this.beatClock -= this.beat;
+    // 沿绝对时间表推进，固定步的取整误差不会延续到下一发。
+    while (this.time + 1e-9 >= this.nextFireAt && this.nextFireAt < this.timeLimit() - 1e-9) {
+      this.nextFireAt += this.fireInterval;
       this.fire();
     }
 
-    // 锈球注入：按时间，不按拍。它和"发球"是两条独立的压力线——
-    // 拍子决定玩家有多忙，锈球决定盘面有多脏。
+    // 锈球按时间注入，独立于玩家的出球频率。
     if (CFG.rustEvery > 0 && this.time >= CFG.rustStart) {
       this.rustClock += dt;
       if (this.rustClock >= CFG.rustEvery) {
@@ -1045,39 +907,8 @@ export class Game {
     return Math.max(0, this.timeLimit() - this.time);
   }
 
-  /**
-   * 底牌暂存槽（E / 右键）。
-   *
-   * 第一次按：把**下一发**那张牌扣进槽里，发牌机补一张新牌。
-   * 第二次按：把槽里的牌换回待发位，原来那张牌扣进槽里。
-   *
-   * 为什么只管"下一发"：玩家的规划窗口是待发 + 两个预览。如果允许从预览位
-   * 里挑，他等于同时管理三张牌，而 UI 只有一个槽——那会变成"哪张在槽里"
-   * 的记忆负担。只动待发位，规则一句话说完：**扣下你现在这张，换上来另一张**。
-   */
-  holdNext() {
-    if (!CFG.holdEnabled || this.dead) return false;
-    const n = this.nozzleCount();
-    const idx = this.volleyIndex % n;
-    const q = this.queues[idx];
-    if (!q || !q.length) return false;
-
-    const cur = q[0];
-    if (this.hold === null) {
-      this.hold = cur;
-      q[0] = this.pickShot();
-      this.holdUses++;
-      this.events.push({ type: 'hold', card: cur, idx, off: this.nozzleOff[idx] });
-    } else {
-      const prev = this.hold;
-      this.hold = cur;
-      q[0] = prev;
-      this.holdUses++;
-      this.events.push({
-        type: 'holdswap', card: prev, out: cur, idx, off: this.nozzleOff[idx],
-      });
-    }
-    return true;
+  get score() {
+    return Math.floor(this.spinDist * 10) / 10;
   }
 
   /**
@@ -1097,12 +928,10 @@ export class Game {
     this.queues[idx].shift();
     this.queues[idx].push(this.pickShot());
 
-    // 时长在 step 里已经按当前节奏算好（flightDur）。这里不再从
-    // nozzleGap / flightSpeed 现推——满速时那两颗数会对不上，
-    // 因为飞行时长现在由"拍内占比"决定，不是由恒定速度决定。
     const dur = this.flightDur;
 
-    this.balls = [{ ci, off: this.nozzleOff[idx], idx, t: 0, dur }];
+    // 追加而不是整组替换：多球并行时，前一颗还在飞，不能被这一颗顶掉。
+    this.balls.push({ ci, off: this.nozzleOff[idx], idx, t: 0, dur, launchAngle: this.aimAngle });
 
     this.firePulse = 1;
     this.fireSeq++;
@@ -1128,21 +957,16 @@ export class Game {
   }
 
   land() {
-    const balls = this.balls;
-    this.balls = [];
-    // 先把落点槽算死，再依次落球：推挤会挪动珠子，但落点只由 phase 决定
-    const targets = balls.map((b) => ({
-      k: mod(Math.round(-this.phase) + b.off, N),
-      ci: b.ci,
-      off: b.off,
-      idx: b.idx,
-    }));
-    for (const t of targets) {
-      // 爆破王牌在骰子 / 基础模式里是"落地即炸"；在扑克模式里它是一张
-      // 参与牌型的 A，只有被消除时才炸左右邻——同一条 ci，两种语义。
-      if (t.ci === BOMB && this.rules !== 'poker') this.detonate(t.k, t.off);
-      else this.dropAt(t.k, t.ci, t.off);
-    }
+    // 只落最前面那一颗。多球并行之后，"到时的球"可能不止一颗，
+    // 由 step 的 while 循环一颗一颗调用——落点必须用它自己落地那一刻的 phase 算，
+    // 一次性清空整组会让后面的球用错误的位置落地。
+    const b = this.balls.shift();
+    if (!b) return;
+    const k = mod(Math.round(-this.phase) + b.off, N);
+    // 爆破王牌在骰子 / 基础模式里是"落地即炸"；在扑克模式里它是一张
+    // 参与牌型的 A，只有被消除时才炸左右邻——同一条 ci，两种语义。
+    if (b.ci === BOMB) this.detonate(k, b.off);
+    else this.dropAt(k, b.ci, b.off);
   }
 
   /**
@@ -1189,7 +1013,7 @@ export class Game {
 
     const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
     const gain = Math.round((BOMB_BASE + BOMB_BASE * 0.6 * (len - 1) + rustHit * 260) * comboMult * this.tempoMult);
-    this.score += gain;
+    this.clearPoints += gain;
     this.clears++;
     this.bumpCombo(len);
 
@@ -1223,7 +1047,7 @@ export class Game {
 
     // 万能球在**吸附之后**才定型：否则落点会偏一格，定出来的颜色也就错了。
     // 扑克模式例外：小丑牌落地后仍是小丑，它要在链上持续充当任意花色/点数。
-    let ci = ci0 === WILD && this.rules !== 'poker' ? this.chooseWildColor(target) : ci0;
+    let ci = ci0 === WILD ? this.chooseWildColor(target) : ci0;
     if (ci0 === WILD) this.wilds++;
 
     // ---- 主动槽：判定在"骰子最终落在哪一格"，不在"球从哪儿落下" ----
@@ -1276,7 +1100,10 @@ export class Game {
         s: mod(target + bead.dx + this.phase, N) * D,
         wild: ci0 === WILD,
       });
-      this.resolve(target, off, true);
+      // 三消不在落地这一帧判定：球还在从 k 滑向 target，
+      // 要等 dx 归零、真正贴上链条那一刻才算（见 step 的补位循环）。
+      bead.pending = true;
+      bead.pendingOff = off;
       return;
     }
 
@@ -1316,15 +1143,34 @@ export class Game {
       wild: ci0 === WILD,
     });
 
-    this.resolve(target, off, true);
+    // 同上：滑行中的球等贴到链条再判定。无滑行（dx=0）时留到本帧
+    // 补位循环末尾统一结算，保证"落地"与"碰到"永远是两件事。
+    bead.pending = true;
+    bead.pendingOff = off;
   }
 
+  /**
+   * 落空补位：球落到轨道上的 k 格后，**球自己**沿轨道滑到离它最近的球旁边，
+   * 停在那颗球前方的空槽里。不是把链上的球推开给自己腾地方——
+   * 移动的是球，链不动。
+   *
+   * 判据只看距离：前后各扫到第一颗球，近者胜；相等时优先右边（+1 顺时针，
+   * 即屏幕右侧那颗）。返回的永远是**空槽**（最近球前一格 / 后一格），
+   * 这样 dropAt 走 lone 分支，不会推挤任何一颗已有的球。
+   *
+   * 落点 k 本身就在链边（最近球只差 1 格）时返回 k，无需滑行。
+   * 空盘时无处可贴，返回 k 自己留在落点。
+   */
   snap(k) {
-    const p = this.nearestBead(k, +1);
-    const q = this.nearestBead(k, -1);
-    if (p < 0 && q < 0) return k;
-    if (p >= 0 && (q < 0 || p <= q)) return mod(k + p, N);
-    return mod(k - q, N);
+    const right = this.nearestBead(k, +1);
+    const left = this.nearestBead(k, -1);
+    if (right < 0 && left < 0) return k;
+    if (right >= 0 && (left < 0 || right <= left)) {
+      // 右边的球在 k+right；球停在它前面那格（k+right-1），与它相切。
+      return mod(k + right - 1, N);
+    }
+    // 左边的球在 k-left；球停在它后面那格（k-left+1）。
+    return mod(k - left + 1, N);
   }
 
   nearestBead(k, dir) {
@@ -1417,7 +1263,6 @@ export class Game {
     let chain = 0;
     let reward = 0;
     let crossedTier = 0;
-    let chipJoker = false;
     for (let guard = 0; guard < 24; guard++) {
       const run = this.findMatch();
       if (!run) break;
@@ -1448,38 +1293,12 @@ export class Game {
       // 必须并进**同一段**：如果单独删掉侧面的锈球，链条中间就会留下洞，
       // 而链条连续是这个游戏所有判定的前提（插入推挤、compact、吸附都假定它）。
       let start = run.start, len = run.len;
-      let bombN = 0;
-
-      // 爆破王牌：它先按 A 参与牌型，牌型成立后再把左右紧邻各一张
-      // （杂牌或暗牌）一起炸掉，每张 +150。这和基础模式"落地即炸"是
-      // 两条完全不同的规则——前者是牌型的一部分，后者是跳过牌型。
-      if (this.rules === 'poker') {
-        let hasAceBomb = false;
-        for (let i = 0; i < run.len; i++) {
-          const b = this.slots[mod(run.start + i, N)];
-          if (b && b.ci === BOMB) { hasAceBomb = true; break; }
-        }
-        if (hasAceBomb) {
-          if (len < N && this.slots[mod(start - 1, N)]) {
-            start = mod(start - 1, N);
-            len++;
-            bombN++;
-          }
-          if (len < N && this.slots[mod(run.start + run.len, N)]) {
-            len++;
-            bombN++;
-          }
-        }
-      }
-
       let rustN = 0;
       if (len < N) {
         const lb = this.slots[mod(start - 1, N)];
         if (lb && lb.ci === RUST) { start = mod(start - 1, N); len++; rustN++; }
       }
       if (len < N) {
-        // 右边界要用**当前的** start+len，不能用 run.start+run.len：
-        // 爆破王牌可能刚刚把右边那张吞掉了，用原边界会把它再数一次。
         const rb = this.slots[mod(start + len, N)];
         if (rb && rb.ci === RUST) { len++; rustN++; }
       }
@@ -1490,32 +1309,8 @@ export class Game {
       // 基础模式保持原来的 1.6/2.6/4.2…（那套是按实测连消分布调出来的）。
       const CM = CFG.chainMult || CHAIN_MULT;
       const chainMult = CM[Math.min(chain - 1, CM.length - 1)];
-      const comboRaw = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
-      // 扑克的牌型密度比骰子高，连消倍率如果不封顶，一次 300 分的同花
-      // 会被 4 倍连消乘成 1200，盘面越松分越高、新手越追不上。
-      // 封顶不是削弱玩家，是把"牌型选择"重新放回收益的主位。
-      const comboMult = CFG.comboCap > 0 ? Math.min(comboRaw, CFG.comboCap) : comboRaw;
-      // 筹码槽：牌型里只要有一张牌压在金色槽上，整段 ×2。
-      // 判定是"这段牌型覆盖了槽位"，不是"这张牌落在槽上"——扑克的计价
-      // 单位是整段牌型，拆不出"这一张值多少"；而"整段 ×2"玩家能预期。
-      let chipPad = null;
-      if (this.rules === 'poker') {
-        for (const p of this.pads) {
-          if (p.kind !== 'chip' || this.time < p.at) continue;
-          for (let i = 0; i < len; i++) {
-            if (mod(start + i, N) === p.slot) { chipPad = p; break; }
-          }
-          if (chipPad) break;
-        }
-      }
-      const chipMult = chipPad ? 2 : 1;
-      // 狂热：同花顺点火的 7 秒内所有消除 ×2。触发的那一下本身不吃，
-      // 所以这里先读**旧**状态，结算完再点火。
-      const frenzyMult = this.frenzyT > 0 ? (CFG.frenzyMult || 1) : 1;
-
-      // 参考分：基础模式按"消掉几颗"查表；骰子 / 扑克由牌型本身决定，
-      // value 已在 findPattern / findHand 里算好。
-      const base = (run.value || BASE_SCORE(run.len)) + rustN * 200 + bombN * 150;
+      const comboMult = COMBO_MULT[Math.min(this.combo, COMBO_MULT.length - 1)];
+      const base = (run.value || BASE_SCORE(run.len)) + rustN * 200;
 
       // ×2 镀金：只要这一段里有一颗镀过金的骰子，整段翻倍。
       // 为什么按整段而不是按颗：顺子是整体计价的，拆不出"这一颗值多少"；
@@ -1529,90 +1324,54 @@ export class Game {
       // 节奏倍率：机器转得越快，同样一次消除越值钱。
       // 这是"节奏越快分越高"的**显式**实现——上一版只有隐含的一层
       // （beat 短 → 单位时间发球多），玩家完全读不出来。
-      const gain = Math.round(base * chainMult * comboMult * this.tempoMult * dbl * chipMult * frenzyMult);
-      this.score += gain;
+      const gain = Math.round(base * chainMult * comboMult * this.tempoMult * dbl);
+      this.clearPoints += gain;
       this.clears++;
       if (run.kind === 'run' && run.len > this.longestRun) this.longestRun = run.len;
       if (run.jackpot) this.jackpots++;
-      if (this.rules === 'poker') {
-        if ((run.kind === 'straight' || run.kind === 'straightflush') && run.len > this.longestStraight) {
-          this.longestStraight = run.len;
-        }
-        if (run.kind === 'straightflush') this.straightFlushes++;
-        if (run.kind === 'three' && run.len >= 4) this.fours++;
-        if (chipPad) {
-          this.chipClears++;
-          if (CFG.chipBonusJoker && (run.kind === 'three' || run.kind === 'straightflush')) {
-            chipJoker = true;
-          }
-        }
-      }
-
       const colors = [];
       const positions = [];
       let hasFlip = false;
-      let hasShift = false;
       let golds = 0;
+      // 连锁段的珠子可能还带着上一段 compact 留下的 dx（视觉上没滑到位）。
+      // 残影和光带必须画在**玩家看到的位置**，否则第二段消除的火花会出现在
+      // 珠子前面的空槽上，读起来像"消错了地方"。合拢变慢之后这个偏差更明显。
+      let s0vis = null;
       for (let i = 0; i < len; i++) {
         const idx = mod(start + i, N);
         const b = this.slots[idx];
         colors.push(b.ci);
-        positions.push(mod(idx + this.phase, N) * D);
+        const vs = mod(idx + (b.dx || 0) + this.phase, N) * D;
+        if (s0vis === null) s0vis = vs;
+        positions.push(vs);
         if (isFlipDie(b.ci)) hasFlip = true;
-        if (isShiftCard(b.ci)) hasShift = true;
         if (b.x2) golds++;
         this.slots[idx] = null;
       }
 
-      const info = this.rules === 'poker'
-        ? pokerLabel(run)
-        : (run.kind ? patternLabel(run) : { name: '', color: null });
+      const info = run.kind ? patternLabel(run) : null;
 
       this.events.push({
-        type: 'clear', chain, gain, base, chainMult, comboMult, rustN, bombN,
-        chip: chipMult, frenzyMult, chipSlot: chipPad ? chipPad.slot : -1,
+        type: 'clear', chain, gain, base, chainMult, comboMult, rustN,
         tempoMult: this.tempoMult,
-        // len 是"本次清掉多少颗"（含两侧被震碎的锈球和爆破王牌炸掉的邻牌），
+        // len 是"本次清掉多少颗"（含两侧被震碎的锈球），
         // matchLen 是真正凑成牌型的长度。奖励球只认 matchLen。
-        colors, positions, len, matchLen: run.len, off, s0,
+        colors, positions, len, matchLen: run.len, off, s0: s0vis ?? s0,
         combo: this.combo,
         // 牌型信息（基础模式无意义，渲染层按 rules 决定读不读）
         kind: run.kind || null, dir: run.dir || 0, pips: run.sum || 0,
-        ranks: run.ranks || null,
         dbl, golds, jackpot: !!run.jackpot,
-        label: info.name,
-        color: info.color,
+        label: info?.key,
+        color: info?.color,
         // 音画映射：这一段连锁以"上一发锁定角度"的音高为根音。
         angle: this.lastShotAngle,
         root: aimFreqStep(this.lastShotStep),
         pan: aimPanStep(this.lastShotStep),
       });
 
-      // 同花顺点火：7 秒狂热 + 续时。放在 clear 事件之后，
-      // 这样触发的那一下不会被自己刚点着的 ×2 再翻一倍。
-      if (run.kind === 'straightflush') {
-        this.frenzyT = CFG.frenzyDur || 7;
-        const before = this.timeBonus;
-        if (CFG.frenzyTime > 0) {
-          this.timeBonus = Math.min(CFG.timeBonusCap, this.timeBonus + CFG.frenzyTime);
-        }
-        this.frenzies++;
-        this.events.push({
-          type: 'frenzy', dur: this.frenzyT, mult: CFG.frenzyMult || 1,
-          add: this.timeBonus - before, total: this.timeBonus,
-          root: aimFreqStep(this.lastShotStep),
-          pan: aimPanStep(this.lastShotStep),
-        });
-      }
-
       // 翻面骰在清除之后、合拢之前结算：它翻的是"还在盘上的左右两颗"，
       // 一旦先 compact，那两颗的邻居关系就变了，翻出来的点数也就对不上。
       if (hasFlip) this.flipNeighbors(start, len, off);
-      // 染花牌同理：先改还在盘上的左右邻，再合拢。
-      // 用**实际清除段** start/len，而不是 run.start/run.len：
-      // 爆破王牌可能把左右各多炸了一张，邻居关系和合拢距离都变了。
-      if (hasShift) this.shiftNeighbors(start, len, off);
-
       this.compact(start, len);
     }
 
@@ -1621,25 +1380,17 @@ export class Game {
       this.chainT = this.time;
       this.maxChain = Math.max(this.maxChain, chain);
 
-      // 一次结算至多发一颗奖励球，避免单次连挤掉两张预览牌：
-      // 扑克筹码槽小丑优先；若常规奖励路线已关闭（如扑克 rewardBombAt=99），
-      // 也不再通过连消档位追加炸弹。
-      if (chipJoker) {
-        this.chipJokers++;
-        this.grantReward(WILD);
-      } else {
-        if (!reward && CFG.rewardBombAt < 99) {
-          if (crossedTier >= 3) reward = WILD;
-          else if (crossedTier >= 2) reward = BOMB;
-        }
-        if (reward) this.grantReward(reward);
+      if (!reward && CFG.rewardBombAt < 99) {
+        if (crossedTier >= 3) reward = WILD;
+        else if (crossedTier >= 2) reward = BOMB;
       }
+      if (reward) this.grantReward(reward);
 
       // 清空跑道：给一次大额奖励，鼓励"敢把盘面打空"。
       // 和消除一样吃节奏倍率——在满速下把 28 格清空，本来就比开局清空难得多。
       if (this.occupied() === 0) {
         const bonus = Math.round(SWEEP_BONUS * this.tempoMult);
-        this.score += bonus;
+        this.clearPoints += bonus;
         this.sweeps++;
         this.events.push({ type: 'sweep', gain: bonus, combo: this.combo });
       }
@@ -1739,64 +1490,6 @@ export class Game {
   }
 
   /**
-   * 染花牌被消掉时，把清除段左右紧邻的两张牌改成同一花色。
-   *
-   * 和翻面骰同一条时间线：必须在清除之后、compact 之前改，否则
-   * "左右邻"已经不是玩家看到的那两张。选花色时同样在**合拢后**的
-   * 副本上穷举 4 种花色，取整环最值钱的牌型——否则染花牌只会染出一个
-   * 玩家看不懂的花色，规则等于不存在。
-   */
-  shiftNeighbors(start, len, off) {
-    const li = mod(start - 1, N);
-    const ri = mod(start + len, N);
-    const L = this.slots[li];
-    const R = this.slots[ri];
-    if (!L || !R) return;
-
-    const canL = isFaceCard(L.ci);
-    const canR = isFaceCard(R.ci);
-    if (!canL && !canR) return;
-
-    const l0 = L.ci, r0 = R.ci;
-
-    const probe = this.slots.slice();
-    {
-      const end = mod(start + len, N);
-      let run = 0;
-      while (run < N - len && probe[mod(end + run, N)] !== null) run++;
-      for (let i = 0; i < run; i++) {
-        const dst = mod(start + i, N), src = mod(end + i, N);
-        probe[dst] = probe[src];
-        probe[src] = null;
-      }
-    }
-
-    let bestSuit = 0, bestV = -1;
-    // 无立即可消牌型时，优先染成靠近外侧相邻牌的花色，而不是恒定染成 ♥
-    const outerL = this.slots[mod(li - 1, N)];
-    const outerR = this.slots[mod(ri + 1, N)];
-    for (let suit = 0; suit < 4; suit++) {
-      if (canL) L.ci = withSuit(l0, suit);
-      if (canR) R.ci = withSuit(r0, suit);
-      const p = findHand(probe, N);
-      let v = p ? p.value + (p.kind === 'straightflush' ? 1500 : 0) : 0;
-      if (v === 0) {
-        if (outerL && suitOf(outerL.ci) === suit) v += 0.2;
-        if (outerR && suitOf(outerR.ci) === suit) v += 0.2;
-      }
-      if (v > bestV) { bestV = v; bestSuit = suit; }
-    }
-
-    if (canL) L.ci = withSuit(l0, bestSuit);
-    if (canR) R.ci = withSuit(r0, bestSuit);
-    this.events.push({
-      type: 'shiftsuit', suit: bestSuit, sym: SUITS[bestSuit].sym,
-      slots: [li, ri], value: bestV, off,
-      s: mod(li + this.phase, N) * D,
-    });
-  }
-
-  /**
    * 把奖励球塞进队列的**待发位**，并挤掉末尾那颗预览球。
    *
    * 为什么插最前面而不是附加：奖励必须"下一发就能用"，否则玩家感受不到因果
@@ -1831,8 +1524,6 @@ export class Game {
     // （value / kind / dir / sum / jackpot），resolve 里用 run.value 优先取值，
     // 所以两种返回结构可以共存于同一条结算管线。
     if (this.rules === 'dice') return findPattern(this.slots, N);
-    // 扑克模式：3..5 张连续窗口，取最值钱的牌型（同花 / 三条 / 顺子 / 同花顺）。
-    if (this.rules === 'poker') return findHand(this.slots, N);
 
     for (let i = 0; i < N; i++) {
       const b = this.slots[i];
@@ -1871,7 +1562,13 @@ export class Game {
       const src = mod(end + i, N);
       this.slots[dst] = this.slots[src];
       this.slots[src] = null;
-      if (this.slots[dst]) this.slots[dst].dx += len;
+      if (this.slots[dst]) {
+        this.slots[dst].dx += len;
+        // 消除合拢单独走慢档：让"空出来的那一段"先被看见，再被后面的珠子填上。
+        // 不能用插入让位的 dxSpeed——那是一整列同时让一格，必须快才不堆叠；
+        // 消除是几格一起空出来，快了就只剩"啪一下合拢"，表现读不出来。
+        this.slots[dst].dv = CFG.dxClearSpeed;
+      }
     }
   }
 
@@ -1882,13 +1579,29 @@ export class Game {
     this.events.push({ type: 'dead', reason });
   }
 
-  setInput(dir) { this.input = dir; }
+  /** 按住时加速，松手后沿最后一次选择的方向回到巡航。 */
+  setInput(dir) {
+    this.input = Math.sign(dir);
+    if (this.input) this.driveDirection = this.input;
+  }
 
-  brake() {
-    if (Math.abs(this.v) <= CFG.brakeMagnet) {
-      this.phase = Math.round(this.phase) % N;
-    }
-    this.v = 0;
+  speedRatio() {
+    return Math.max(0, Math.min(1, (Math.abs(this.v) - CFG.drift) / (CFG.vMax - CFG.drift)));
+  }
+
+  coastDistance(time) {
+    const cruise = this.driveDirection * CFG.drift;
+    return cruise * time + (this.v - cruise) * -Math.expm1(-CFG.dampK * time) / CFG.dampK;
+  }
+
+  /** 当前出弹周期的进度（0..1）。 */
+  launchProgress() {
+    return Math.max(0, 1 - this.nextFireIn() / this.fireInterval);
+  }
+
+  /** 距离下一发出膛还有多久（游戏时间秒）。 */
+  nextFireIn() {
+    return Math.max(0, this.nextFireAt - this.time);
   }
 
   beadWorldS(slot) {
