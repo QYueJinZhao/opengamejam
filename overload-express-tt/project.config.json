@@ -1,0 +1,32 @@
+{
+  "miniprogramRoot": "./",
+  "projectname": "overload-express-tt",
+  "appid": "tt83b6f50b1dc41a3c02",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "postcss": false,
+    "minified": true,
+    "newFeature": true
+  },
+  "compileType": "game",
+  "packOptions": {
+    "ignore": [
+      { "type": "file", "value": "preview.html" },
+      { "type": "file", "value": "serve.mjs" },
+      { "type": "file", "value": "test.mjs" },
+      { "type": "file", "value": "build.mjs" },
+      { "type": "file", "value": "package.json" },
+      { "type": "file", "value": "package-lock.json" },
+      { "type": "file", "value": "AGENTS.md" },
+      { "type": "file", "value": "start.cmd" },
+      { "type": "file", "value": "README.md" },
+      { "type": "folder", "value": "node_modules" },
+      { "type": "folder", "value": "tests" },
+      { "type": "folder", "value": "qa" },
+      { "type": "folder", "value": "docs" },
+      { "type": "folder", "value": "tools" },
+      { "type": "folder", "value": "dist" }
+    ]
+  }
+}

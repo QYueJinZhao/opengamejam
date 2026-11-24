@@ -13,3 +13,4 @@ dist/
 # editor temp / screenshot caches
 .trae-html-share-packages/
 _shots/
+overload-express-tt/qa
